@@ -94,7 +94,7 @@ window.SqlScratchTab = {
 
     // Draggable splitter to adjust the editor/results heights.
     const splitter = document.createElement('div');
-    splitter.className = 'shrink-0 h-1.5 cursor-row-resize rounded bg-base-300 hover:bg-primary/50 transition-colors';
+    splitter.className = 'dashed-sep-h shrink-0 h-1.5 cursor-row-resize transition-colors';
     splitter.setAttribute('role', 'separator');
     splitter.setAttribute('aria-orientation', 'horizontal');
 
@@ -110,7 +110,7 @@ window.SqlScratchTab = {
     let dragging = false;
     const onDown = (e) => {
       dragging = true;
-      splitter.classList.add('bg-primary/60');
+      splitter.classList.add('dashed-sep-active');
       document.body.style.userSelect = 'none';
       e.preventDefault();
     };
@@ -126,7 +126,7 @@ window.SqlScratchTab = {
     const onUp = () => {
       if (!dragging) return;
       dragging = false;
-      splitter.classList.remove('bg-primary/60');
+      splitter.classList.remove('dashed-sep-active');
       document.body.style.userSelect = '';
     };
     splitter.addEventListener('pointerdown', onDown);
@@ -154,12 +154,14 @@ window.SqlScratchTab = {
     const runCurrentQuery = () => this._execute(window.SqlEditor.getStatementAtCursor(view), opts, ctx, bar);
     // Remember the editor contents per context (database, and each table).
     const storageKey = this._storageKey(opts);
+    const saveId = opts && opts.table ? 'tableSql' : 'dbSql';
     let initialDoc = '';
     try { initialDoc = localStorage.getItem(storageKey) || ''; } catch (e) { /* ignore */ }
     // Persist edits (debounced) so the content survives refreshes and remounts.
     let saveTimer = null;
     const persistDoc = (text) => {
       updateEmptyState(text);
+      if (window.saveEnabled && !window.saveEnabled(saveId)) return;
       clearTimeout(saveTimer);
       saveTimer = setTimeout(() => {
         try { localStorage.setItem(storageKey, text); } catch (e) { /* ignore */ }
@@ -291,6 +293,7 @@ window.SqlScratchTab = {
     const ctx = { results, sections: [], current: 0, refreshBtn, trashBtn, selectedRow: null, opts, view, editMeta: null };
     // Persists the editor contents for this context's storage key.
     ctx.persist = () => {
+      if (window.saveEnabled && !window.saveEnabled(saveId)) return;
       try { localStorage.setItem(storageKey, window.SqlEditor.getValue(view)); } catch (e) { /* ignore */ }
     };
     // Selects a single result row (clearing any previous selection) and enables
