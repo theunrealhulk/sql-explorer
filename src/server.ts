@@ -34,4 +34,5 @@ app.get('/', (_req, res) => res.sendFile(path.join(viewsDir, 'index.html')));
 // API routes -> controllers
 app.use('/api', apiRoutes);
 
-app.listen(3000, () => console.log('http://localhost:3000'));
+const port = Number(process.env.PORT) || 3000;
+app.listen(port, () => console.log(`http://localhost:${port}`));
