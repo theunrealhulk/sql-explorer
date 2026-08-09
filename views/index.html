@@ -1,0 +1,977 @@
+<!DOCTYPE html>
+<html data-theme="light">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>SQL Explorer</title>
+<link href="/output.css" rel="stylesheet"><link href="/vendor/jsoneditor/jsoneditor.min.css" rel="stylesheet"><script src="/vendor/lucide/lucide.min.js"></script><script src="/vendor/d3/d3.min.js"></script><script src="/vendor/jsoneditor/jsoneditor.min.js"></script><script src="/table-details.js" defer></script><script src="/db-details.js" defer></script><script src="/view-details.js" defer></script><script src="/vendor/codemirror/codemirror.js" defer></script><script src="/sql-tab.js" defer></script>
+<style>
+/* JSONEditor dark theme — applied only under daisyUI dark theme */
+html[data-theme="dark"] .jsoneditor,
+html[data-theme="dark"] .jsoneditor-menu {
+  border-color: #3a3f4b;
+}
+html[data-theme="dark"] .jsoneditor-menu {
+  background-color: #2a2e37;
+}
+html[data-theme="dark"] .jsoneditor-search input,
+html[data-theme="dark"] .jsoneditor-contextmenu .jsoneditor-menu button {
+  background: #3a3f4b;
+  color: #e5e7eb;
+}
+html[data-theme="dark"] .jsoneditor-frame,
+html[data-theme="dark"] .jsoneditor-search .jsoneditor-frame {
+  background: #3a3f4b;
+  color: #e5e7eb;
+}
+html[data-theme="dark"] .jsoneditor-tree,
+html[data-theme="dark"] table.jsoneditor-tree {
+  background-color: #1d232a;
+  color: #e5e7eb;
+}
+html[data-theme="dark"] .jsoneditor-field,
+html[data-theme="dark"] .jsoneditor-value {
+  color: #e5e7eb;
+}
+html[data-theme="dark"] table.jsoneditor-search div.jsoneditor-frame {
+  background: transparent;
+}
+html[data-theme="dark"] tr.jsoneditor-highlight,
+html[data-theme="dark"] tr.jsoneditor-selected {
+  background-color: #2a2e37;
+}
+html[data-theme="dark"] .jsoneditor-tree button.jsoneditor-button {
+  background-color: transparent;
+}
+html[data-theme="dark"] div.jsoneditor-tree button.jsoneditor-button:focus {
+  background-color: #2a2e37;
+  outline: none;
+}
+html[data-theme="dark"] .jsoneditor-readonly,
+html[data-theme="dark"] div.jsoneditor td.jsoneditor-separator {
+  color: #9ca3af;
+}
+html[data-theme="dark"] .jsoneditor-value.jsoneditor-string { color: #4ade80; }
+html[data-theme="dark"] .jsoneditor-value.jsoneditor-object,
+html[data-theme="dark"] .jsoneditor-value.jsoneditor-array { color: #9ca3af; }
+html[data-theme="dark"] .jsoneditor-value.jsoneditor-number { color: #f87171; }
+html[data-theme="dark"] .jsoneditor-value.jsoneditor-boolean { color: #fb923c; }
+html[data-theme="dark"] .jsoneditor-value.jsoneditor-null { color: #60a5fa; }
+html[data-theme="dark"] .jsoneditor-value.jsoneditor-invalid { color: #e5e7eb; }
+</style>
+</head>
+<body class="bg-base-200 min-h-screen">
+  <div class="drawer lg:drawer-open">
+    <input id="explorer-drawer" type="checkbox" class="drawer-toggle" />
+
+    <!-- Main content -->
+    <div class="drawer-content flex flex-col">
+      <div class="navbar bg-base-100 border-b border-base-300">
+        <div class="flex-none lg:hidden">
+          <label for="explorer-drawer" aria-label="open sidebar" class="btn btn-square btn-ghost">
+            <svg xmlns="http://www.w3.org/2000/svg" class="size-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" /></svg>
+          </label>
+        </div>
+        <div class="flex-1 flex items-center gap-2 px-2">
+          <span class="text-lg font-bold flex items-center gap-2"><i data-lucide="database" class="size-5"></i>SQL Explorer</span>
+          <div id="db-tabs" class="flex items-center gap-1"></div>
+        </div>
+        <label class="swap swap-rotate btn btn-ghost btn-circle">
+          <input id="theme-toggle" type="checkbox" class="theme-controller" value="dark" />
+          <i data-lucide="sun" class="swap-off size-5"></i>
+          <i data-lucide="moon" class="swap-on size-5"></i>
+        </label>
+      </div>
+
+      <main class="flex-1 space-y-4 p-4">
+        <div class="flex items-center gap-2">
+          <div class="join">
+            <button id="nav-back" class="btn btn-sm btn-ghost join-item" title="Back" disabled onclick="goBack()"><i data-lucide="arrow-left" class="size-4"></i></button>
+            <button id="nav-forward" class="btn btn-sm btn-ghost join-item" title="Forward" disabled onclick="goForward()"><i data-lucide="arrow-right" class="size-4"></i></button>
+          </div>
+          <div class="breadcrumbs text-sm">
+            <ul id="crumbs-list"><li>Server</li></ul>
+          </div>
+          <span id="crumb-info" class="hidden alert alert-info alert-soft border border-info grow py-1 text-sm font-medium"></span>
+        </div>
+        <div id="status"></div>
+        <p id="placeholder" class="text-base-content/60">Connect and pick databases and objects from the explorer on the side.</p>
+        <div id="detail"></div>
+      </main>
+    </div>
+
+    <!-- Sidebar: server explorer -->
+    <div class="drawer-side">
+      <label for="explorer-drawer" aria-label="close sidebar" class="drawer-overlay"></label>
+      <aside id="sidebar" class="relative min-h-full w-80 space-y-4 border-r border-base-300 bg-base-100 p-4">
+        <h2 id="sidebar-header" class="text-lg font-bold flex items-center gap-2 cursor-pointer select-none" title="Toggle sidebar"><i data-lucide="server" class="size-5"></i><span class="sidebar-label">Server</span></h2>
+        <div class="sidebar-conn space-y-2">
+          <label class="label" for="cs">Connection string</label>
+          <input id="cs" class="input input-sm w-full" placeholder="Server=...;Database=master;User Id=...;Password=...;Encrypt=true;TrustServerCertificate=true">
+          <button onclick="connect()" class="btn btn-primary btn-sm btn-block"><i data-lucide="plug" class="size-4"></i>Connect</button>
+        </div>
+        <div id="tree" class="space-y-2"></div>
+        <div id="sidebar-resizer" class="absolute top-0 right-0 z-10 h-full w-1.5 cursor-col-resize hover:bg-primary/40 active:bg-primary/60"></div>
+      </aside>
+    </div>
+  </div>
+
+<script>
+let CS = '';
+let currentDb = null;      // last selected database
+let currentTable = null;   // last selected table object { name, fieldCount, fkCount }
+let totalDbs = 0;          // number of databases on the server
+let dbCounts = {};         // db name -> { category: count }
+let dbTables = {};         // db name -> Tables[] (for cross-linking)
+let dbViews = {};          // db name -> Views[]
+
+// Lucide icon helpers
+const CAT_ICONS = { 'Tables': 'table', 'Views': 'eye', 'Stored Procedures': 'terminal', 'Functions': 'braces', 'Triggers': 'zap' };
+function icon(name, cls) {
+  const i = document.createElement('i');
+  i.setAttribute('data-lucide', name);
+  i.className = 'size-4 shrink-0' + (cls ? ' ' + cls : '');
+  return i;
+}
+function refreshIcons() { if (window.lucide) lucide.createIcons(); }
+
+// Breadcrumbs: Server > current db (if any) > current table (if any)
+function renderCrumbs() {
+  const ul = document.getElementById('crumbs-list');
+  ul.innerHTML = '';
+  const add = (text, onClick) => {
+    const li = document.createElement('li');
+    if (onClick) {
+      const a = document.createElement('a');
+      a.href = '#';
+      a.className = 'link link-hover';
+      a.textContent = text;
+      a.addEventListener('click', (e) => { e.preventDefault(); onClick(); });
+      li.appendChild(a);
+    } else {
+      li.textContent = text;
+    }
+    ul.appendChild(li);
+  };
+  add('Server', (currentDb || currentTable) ? selectServer : null);
+  if (currentDb) add(currentDb, currentTable ? () => selectDb(currentDb) : null);
+  if (currentTable) add(currentTable.name);
+
+  renderTabs();
+}
+
+// --- Tabs -----------------------------------------------------------------
+// Each tab keeps its own navigation context (selected db / object). All tabs
+// share the same connection string. There is always at least one tab.
+let tabs = [];             // [{ id, context: { db, name, kind } | null }]
+let activeTabId = null;
+let tabSeq = 0;
+
+function activeTab() { return tabs.find(t => t.id === activeTabId) || null; }
+
+// Loads tabs from localStorage, migrating the legacy single-context storage
+// into a default first tab the first time around.
+function loadTabs() {
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem('sql-explorer-tabs') || 'null'); } catch (e) { saved = null; }
+  if (saved && Array.isArray(saved.tabs) && saved.tabs.length) {
+    tabs = saved.tabs.map(t => ({ id: t.id, context: t.context || null }));
+    tabSeq = Math.max(...tabs.map(t => t.id));
+    activeTabId = tabs.some(t => t.id === saved.activeTabId) ? saved.activeTabId : tabs[0].id;
+  } else {
+    let legacy = null;
+    try { legacy = JSON.parse(localStorage.getItem('crumb-context') || 'null'); } catch (e) { legacy = null; }
+    tabSeq = 1;
+    tabs = [{ id: 1, context: (legacy && legacy.db) ? legacy : null }];
+    activeTabId = 1;
+  }
+}
+
+function saveTabs() {
+  try {
+    localStorage.setItem('sql-explorer-tabs', JSON.stringify({
+      tabs: tabs.map(t => ({ id: t.id, context: t.context })),
+      activeTabId,
+    }));
+  } catch (e) { /* ignore */ }
+}
+
+// Renders the tab strip next to the title plus the trailing "new tab" button.
+function renderTabs() {
+  const bar = document.getElementById('db-tabs');
+  if (!bar) return;
+  bar.innerHTML = '';
+  tabs.forEach(tab => {
+    const isActive = tab.id === activeTabId;
+    const btn = document.createElement('button');
+    btn.className = 'btn btn-sm ' + (isActive ? 'btn-active' : 'btn-ghost');
+    const label = document.createElement('span');
+    const dbName = isActive ? currentDb : (tab.context && tab.context.db);
+    label.textContent = dbName || 'Server';
+    btn.appendChild(label);
+    btn.addEventListener('click', () => switchTab(tab.id));
+    if (tabs.length > 1) {
+      const close = document.createElement('span');
+      close.className = 'ml-1 opacity-60 hover:opacity-100';
+      close.textContent = '\u2715';
+      close.title = 'Close tab';
+      close.addEventListener('click', (e) => { e.stopPropagation(); closeTab(tab.id); });
+      btn.appendChild(close);
+    }
+    bar.appendChild(btn);
+  });
+  const add = document.createElement('button');
+  add.className = 'btn btn-sm btn-ghost btn-square';
+  add.title = 'New tab';
+  add.appendChild(icon('plus'));
+  add.addEventListener('click', newTab);
+  bar.appendChild(add);
+  refreshIcons();
+}
+
+function switchTab(id) {
+  if (id === activeTabId) return;
+  saveContext();               // capture the current selection into its tab
+  activeTabId = id;
+  navHistory = []; navIndex = -1; updateNavButtons();
+  renderTabs();
+  const tab = activeTab();
+  applyContext(tab ? tab.context : null);
+  saveTabs();
+}
+
+function newTab() {
+  saveContext();
+  const tab = { id: ++tabSeq, context: null };
+  tabs.push(tab);
+  activeTabId = tab.id;
+  navHistory = []; navIndex = -1; updateNavButtons();
+  renderTabs();
+  applyContext(null);          // fresh tab starts at the server view
+  saveTabs();
+}
+
+function closeTab(id) {
+  if (tabs.length <= 1) return;   // never close the last remaining tab
+  const idx = tabs.findIndex(t => t.id === id);
+  if (idx === -1) return;
+  tabs.splice(idx, 1);
+  if (activeTabId === id) {
+    const next = tabs[idx] || tabs[idx - 1] || tabs[0];
+    activeTabId = next.id;
+    navHistory = []; navIndex = -1; updateNavButtons();
+    renderTabs();
+    applyContext(next.context);
+  } else {
+    renderTabs();
+  }
+  saveTabs();
+}
+
+function selectServer() {
+  currentDb = null; currentTable = null; renderCrumbs(); renderInfo(); clearTableDetails(); highlightDb(null);
+  renderServerHome();
+  saveContext();
+}
+
+// Summary line for a database, e.g. "12 tables, 34 table references, 3 views"
+function dbSummaryText(db) {
+  const counts = dbCounts[db];
+  const order = ['Tables', 'Views', 'Stored Procedures', 'Functions', 'Triggers'];
+  const fkTotal = (dbTables[db] || []).reduce((sum, t) => sum + (t.fkCount || 0), 0);
+  const parts = [];
+  order.forEach(k => {
+    if (counts[k] > 0) parts.push(counts[k] + ' ' + k.toLowerCase());
+    if (k === 'Tables' && fkTotal > 0) parts.push(fkTotal + ' table references');
+  });
+  return parts.join(', ');
+}
+
+// Renders the dynamic info line based on the current selection
+function renderInfo() {
+  const status = document.getElementById('status');
+  const crumbInfo = document.getElementById('crumb-info');
+  status.innerHTML = '';
+  crumbInfo.innerHTML = '';
+  crumbInfo.classList.remove('hidden');
+
+  if (currentTable) {
+    const box = document.createElement('span');
+    const stats = [];
+    if (currentTable.fieldCount > 0) stats.push(currentTable.fieldCount + ' fields');
+    if (currentTable.fkCount > 0) stats.push(currentTable.fkCount + ' foreign keys');
+    if (stats.length) box.append(stats.join(', '));
+    const appendTableLinks = (label, csv, badgeClass) => {
+      box.append(label);
+      csv.split(',').filter(Boolean).forEach((n, i) => {
+        if (i > 0) box.append(badgeClass ? ' ' : ', ');
+        const a = document.createElement('a');
+        a.href = '#';
+        a.className = badgeClass
+          ? 'badge badge-sm font-bold align-middle cursor-pointer ' + badgeClass
+          : 'font-bold link link-hover';
+        a.textContent = n;
+        a.addEventListener('click', (e) => {
+          e.preventDefault();
+          const t = (dbTables[currentDb] || []).find(x => x.name === n);
+          if (t) selectTable(currentDb, t);
+        });
+        box.appendChild(a);
+      });
+    };
+    if (currentTable.referencedByCount > 0 && currentTable.referencedBy) {
+      appendTableLinks(', referenced in ' + currentTable.referencedByCount + ' tables: ', currentTable.referencedBy, 'bg-green-500 text-white border-none');
+    }
+    if (currentTable.referencesCount > 0 && currentTable.referencesTables) {
+      appendTableLinks(', references ' + currentTable.referencesCount + ' tables: ', currentTable.referencesTables, 'badge-secondary');
+    }
+    crumbInfo.appendChild(box);
+  } else if (currentDb) {
+    crumbInfo.textContent = dbCounts[currentDb] ? dbSummaryText(currentDb) : currentDb;
+  } else {
+    crumbInfo.textContent = 'Connected. ' + totalDbs + ' databases.';
+  }
+}
+
+function selectDb(db) {
+  currentDb = db; currentTable = null; renderCrumbs(); renderInfo(); showDbDetails(db); highlightDb(db);
+  pushHistory(db, null);
+  saveContext();
+}
+function selectTable(db, table) {
+  currentDb = db; currentTable = table; renderCrumbs(); renderInfo(); showTableDetails(db, table);
+  pushHistory(db, table.name, 'table');
+  highlightDb(db);
+  saveContext();
+}
+function selectView(db, view) {
+  currentDb = db; currentTable = view; renderCrumbs(); renderInfo(); showViewDetails(db, view);
+  pushHistory(db, view.name, 'view');
+  highlightDb(db);
+  saveContext();
+}
+// Stored procedures, functions and triggers: show only the SQL definition.
+function selectObject(db, item) {
+  currentDb = db; currentTable = item; renderCrumbs(); renderInfo(); showObjectDetails(db, item);
+  pushHistory(db, item.name, 'object');
+  highlightDb(db);
+  saveContext();
+}
+
+// Highlights the selected database node in the sidebar with a yellow variant.
+function highlightDb(db) {
+  document.querySelectorAll('.db-summary').forEach(s => {
+    const selected = s.dataset.db === db;
+    s.classList.toggle('border-green-500', !selected);
+    s.classList.toggle('bg-green-500/10', !selected);
+    s.classList.toggle('border-yellow-500', selected);
+    s.classList.toggle('bg-yellow-500/10', selected);
+  });
+}
+
+// --- Navigation history (back / forward) ---
+// Each entry is a { db, name } pair. A null `name` represents a database view;
+// a non-null `name` represents a table view within that database.
+let navHistory = [];   // [{ db, name }]
+let navIndex = -1;     // pointer into navHistory
+let pendingRestoreDb = null; // db whose toggle should skip auto-select during restore
+
+function pushHistory(db, name, kind) {
+  // Ignore if it's the same as the current entry
+  const cur = navHistory[navIndex];
+  if (cur && cur.db === db && cur.name === (name || null)) return;
+  navHistory = navHistory.slice(0, navIndex + 1); // drop forward entries
+  navHistory.push({ db, name: name || null, kind: kind || (name ? 'table' : null) });
+  navIndex = navHistory.length - 1;
+  updateNavButtons();
+}
+
+function applyHistory() {
+  const entry = navHistory[navIndex];
+  if (!entry) return;
+  if (entry.kind === 'view') {
+    const v = (dbViews[entry.db] || []).find(x => x.name === entry.name) || { name: entry.name, schemaName: 'dbo' };
+    currentDb = entry.db; currentTable = v;
+    renderCrumbs(); renderInfo(); showViewDetails(entry.db, v);
+  } else if (entry.kind === 'object') {
+    const item = { name: entry.name };
+    currentDb = entry.db; currentTable = item;
+    renderCrumbs(); renderInfo(); showObjectDetails(entry.db, item);
+  } else if (entry.name) {
+    const t = (dbTables[entry.db] || []).find(x => x.name === entry.name) || { name: entry.name, schemaName: 'dbo' };
+    currentDb = entry.db; currentTable = t;
+    renderCrumbs(); renderInfo(); showTableDetails(entry.db, t);
+  } else {
+    currentDb = entry.db; currentTable = null;
+    renderCrumbs(); renderInfo(); showDbDetails(entry.db);
+  }
+  highlightDb(entry.db);
+  updateNavButtons();
+}
+
+function goBack() { if (navIndex > 0) { navIndex--; applyHistory(); } }
+function goForward() { if (navIndex < navHistory.length - 1) { navIndex++; applyHistory(); } }
+
+function updateNavButtons() {
+  const back = document.getElementById('nav-back');
+  const fwd = document.getElementById('nav-forward');
+  if (back) back.disabled = navIndex <= 0;
+  if (fwd) fwd.disabled = navIndex >= navHistory.length - 1;
+}
+
+// Mounts the <table-details> web component for the selected table.
+function showTableDetails(db, table) {
+  const placeholder = document.getElementById('placeholder');
+  if (placeholder) placeholder.style.display = 'none';
+  const host = document.getElementById('detail');
+  host.innerHTML = '';
+  const el = document.createElement('table-details');
+  el.setAttribute('cs', CS);
+  el.setAttribute('database', db);
+  el.setAttribute('schema', table.schemaName || 'dbo');
+  el.setAttribute('table', table.name);
+  host.appendChild(el);
+}
+
+function clearTableDetails() {
+  const host = document.getElementById('detail');
+  if (host) host.innerHTML = '';
+}
+
+// Home screen (server view, nothing selected): a grid of database widgets, each
+// showing the db name plus table / view / relation counts as icon:value stats.
+let dbStats = [];   // [{ name, tables, views, relations }]
+
+async function loadDbStats() {
+  if (!CS) return;
+  try {
+    const res = await api('db-stats', { connectionString: CS });
+    if (res.ok && Array.isArray(res.stats)) dbStats = res.stats;
+  } catch (e) { /* ignore */ }
+  if (!currentDb && !currentTable) renderServerHome();
+}
+
+function renderServerHome() {
+  const placeholder = document.getElementById('placeholder');
+  if (placeholder) placeholder.style.display = 'none';
+  const host = document.getElementById('detail');
+  if (!host) return;
+  host.innerHTML = '';
+
+  const grid = document.createElement('div');
+  grid.style.display = 'grid';
+  grid.style.gap = '1rem';
+  grid.style.gridTemplateColumns = 'repeat(auto-fill, minmax(13rem, 1fr))';
+
+  const stat = (iconName, value) => {
+    const s = document.createElement('span');
+    s.className = 'flex items-center gap-1 text-sm text-base-content/70';
+    s.appendChild(icon(iconName));
+    const v = document.createElement('span');
+    v.className = 'font-semibold text-base-content';
+    v.textContent = value;
+    s.appendChild(v);
+    return s;
+  };
+
+  dbStats.forEach(d => {
+    const card = document.createElement('button');
+    card.type = 'button';
+    card.className = 'card bg-base-100 border border-base-300 p-4 text-left shadow-sm';
+    card.style.cursor = 'pointer';
+    card.style.transition = 'border-color .15s, box-shadow .15s, transform .15s';
+    card.addEventListener('mouseenter', () => {
+      card.style.borderColor = 'var(--color-primary, #3b82f6)';
+      card.style.boxShadow = '0 4px 12px rgba(0,0,0,.15)';
+      card.style.transform = 'translateY(-2px)';
+    });
+    card.addEventListener('mouseleave', () => {
+      card.style.borderColor = '';
+      card.style.boxShadow = '';
+      card.style.transform = '';
+    });
+    card.addEventListener('click', () => selectDb(d.name));
+
+    const title = document.createElement('div');
+    title.className = 'mb-3 flex items-center gap-2 font-bold break-all';
+    title.appendChild(icon('database'));
+    const name = document.createElement('span');
+    name.textContent = d.name;
+    title.appendChild(name);
+    card.appendChild(title);
+
+    const stats = document.createElement('div');
+    stats.className = 'flex flex-wrap gap-4';
+    stats.append(
+      stat('table', String(d.tables ?? 0)),
+      stat('eye', String(d.views ?? 0)),
+      stat('cable', String(d.relations ?? 0)),
+    );
+    card.appendChild(stats);
+
+    grid.appendChild(card);
+  });
+
+  host.appendChild(grid);
+  refreshIcons();
+}
+
+// Mounts the <view-details> web component for the selected view.
+function showViewDetails(db, view) {
+  const placeholder = document.getElementById('placeholder');
+  if (placeholder) placeholder.style.display = 'none';
+  const host = document.getElementById('detail');
+  host.innerHTML = '';
+  const el = document.createElement('view-details');
+  el.setAttribute('cs', CS);
+  el.setAttribute('database', db);
+  el.setAttribute('schema', view.schemaName || 'dbo');
+  el.setAttribute('view', view.name);
+  host.appendChild(el);
+}
+
+// Mounts a query-only <view-details> for a stored procedure, function or trigger.
+function showObjectDetails(db, item) {
+  const placeholder = document.getElementById('placeholder');
+  if (placeholder) placeholder.style.display = 'none';
+  const host = document.getElementById('detail');
+  host.innerHTML = '';
+  const el = document.createElement('view-details');
+  el.setAttribute('cs', CS);
+  el.setAttribute('database', db);
+  el.setAttribute('schema', item.schemaName || '');
+  el.setAttribute('view', item.name);
+  el.setAttribute('tabs', 'Query');
+  host.appendChild(el);
+}
+
+// Mounts the <db-details> web component for the selected database.
+function showDbDetails(db) {
+  const placeholder = document.getElementById('placeholder');
+  if (placeholder) placeholder.style.display = 'none';
+  const host = document.getElementById('detail');
+  host.innerHTML = '';
+  const el = document.createElement('db-details');
+  el.setAttribute('cs', CS);
+  el.setAttribute('database', db);
+  host.appendChild(el);
+}
+
+window.addEventListener('DOMContentLoaded', async () => {
+  initTheme();
+  initSidebarResize();
+  initSidebarToggle();
+  refreshIcons();
+  const savedCs = localStorage.getItem('connection-string');
+  if (savedCs) {
+    document.getElementById('cs').value = savedCs;
+    connect();
+    return;
+  }
+  const res = await fetch('/api/config');
+  const data = await res.json();
+  if (data.connectionString) {
+    document.getElementById('cs').value = data.connectionString;
+  }
+});
+
+// Lets the user collapse/expand the sidebar by clicking the "Server" header.
+function initSidebarToggle() {
+  const sidebar = document.getElementById('sidebar');
+  const header = document.getElementById('sidebar-header');
+  if (!sidebar || !header) return;
+  applySidebarCollapsed(localStorage.getItem('sidebar-collapsed') === '1');
+  header.addEventListener('click', () => {
+    const next = !sidebar.classList.contains('sidebar-collapsed');
+    applySidebarCollapsed(next);
+    localStorage.setItem('sidebar-collapsed', next ? '1' : '0');
+  });
+}
+
+// Shows/hides the sidebar body, shrinking it to an icon-only strip when
+// collapsed. The "Server" icon stays visible so it can be clicked to expand.
+function applySidebarCollapsed(collapsed) {
+  const sidebar = document.getElementById('sidebar');
+  if (!sidebar) return;
+  const label = sidebar.querySelector('.sidebar-label');
+  const conn = sidebar.querySelector('.sidebar-conn');
+  const tree = document.getElementById('tree');
+  const resizer = document.getElementById('sidebar-resizer');
+  sidebar.classList.toggle('sidebar-collapsed', collapsed);
+  if (collapsed) {
+    sidebar._prevWidth = sidebar.style.width || '';
+    sidebar.classList.remove('w-80');
+    sidebar.style.width = '3.25rem';
+    sidebar.classList.replace('p-4', 'p-2');
+  } else {
+    sidebar.classList.replace('p-2', 'p-4');
+    sidebar.style.width = sidebar._prevWidth || '';
+    if (!sidebar.style.width) sidebar.classList.add('w-80');
+  }
+  [label, conn, tree, resizer].forEach(el => { if (el) el.classList.toggle('hidden', collapsed); });
+}
+
+// Lets the user drag the right edge of the sidebar to resize it.
+function initSidebarResize() {
+  const sidebar = document.getElementById('sidebar');
+  const handle = document.getElementById('sidebar-resizer');
+  if (!sidebar || !handle) return;
+  const MIN = 220, MAX = 640;
+  const saved = parseInt(localStorage.getItem('sidebar-width') || '', 10);
+  if (saved >= MIN && saved <= MAX) {
+    sidebar.classList.remove('w-80');
+    sidebar.style.width = saved + 'px';
+  }
+  let dragging = false;
+  const onMove = (e) => {
+    if (!dragging) return;
+    const width = Math.min(MAX, Math.max(MIN, e.clientX - sidebar.getBoundingClientRect().left));
+    sidebar.style.width = width + 'px';
+  };
+  const onUp = () => {
+    if (!dragging) return;
+    dragging = false;
+    document.body.classList.remove('select-none', 'cursor-col-resize');
+    localStorage.setItem('sidebar-width', String(parseInt(sidebar.style.width, 10)));
+    window.removeEventListener('mousemove', onMove);
+    window.removeEventListener('mouseup', onUp);
+  };
+  handle.addEventListener('mousedown', (e) => {
+    e.preventDefault();
+    dragging = true;
+    sidebar.classList.remove('w-80');
+    document.body.classList.add('select-none', 'cursor-col-resize');
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  });
+}
+
+// Theme: use saved choice, otherwise follow the system preference.
+function initTheme() {
+  const saved = localStorage.getItem('theme');
+  const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+  const theme = saved || (prefersDark ? 'dark' : 'light');
+  document.documentElement.setAttribute('data-theme', theme);
+  const toggle = document.getElementById('theme-toggle');
+  toggle.checked = theme === 'dark';
+  toggle.addEventListener('change', () => {
+    const next = toggle.checked ? 'dark' : 'light';
+    document.documentElement.setAttribute('data-theme', next);
+    localStorage.setItem('theme', next);
+  });
+}
+
+async function api(path, body) {
+  const res = await fetch('/api/' + path, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+  return res.json();
+}
+
+async function connect() {
+  CS = document.getElementById('cs').value;
+  const status = document.getElementById('status');
+  const tree = document.getElementById('tree');
+  tree.innerHTML = '';
+  currentDb = null; currentTable = null; dbCounts = {}; dbTables = {}; renderCrumbs();
+  navHistory = []; navIndex = -1; updateNavButtons();
+  const data = await api('connect', { connectionString: CS });
+  if (!data.ok) { status.innerHTML = '<div role="alert" class="alert alert-error alert-soft">' + data.error + '</div>'; return; }
+  localStorage.setItem('connection-string', CS);
+  totalDbs = data.databases.length;
+  renderInfo();
+  data.databases.forEach(db => tree.appendChild(dbNode(db)));
+  refreshIcons();
+  loadTabs();
+  renderTabs();
+  await applyContext(activeTab() ? activeTab().context : null);
+  loadDbStats();
+}
+
+// Persists the current selection into the active tab's context so it can be
+// restored when switching back to the tab or after a refresh.
+function saveContext() {
+  const tab = activeTab();
+  if (tab) {
+    if (!currentDb && !currentTable) {
+      tab.context = null;
+    } else {
+      const entry = navHistory[navIndex];
+      const kind = (entry && entry.kind) || (currentTable ? 'table' : null);
+      tab.context = {
+        db: currentDb,
+        name: currentTable ? currentTable.name : null,
+        kind: kind,
+      };
+    }
+  }
+  saveTabs();
+}
+
+// Applies a saved context (database + selected object) to the current view.
+// Passing null (or a context with no db) resets to the server view. Loads the
+// target database's objects first so the selected table/view/object resolves.
+async function applyContext(saved) {
+  currentDb = null; currentTable = null;
+  if (!saved || !saved.db) {
+    renderCrumbs(); renderInfo(); clearTableDetails(); highlightDb(null); updateNavButtons();
+    renderServerHome();
+    return;
+  }
+  const data = await api('objects', { connectionString: CS, database: saved.db });
+  if (data.ok) {
+    dbCounts[saved.db] = {};
+    for (const [cat, items] of Object.entries(data.categories)) {
+      dbCounts[saved.db][cat] = items.length;
+      if (cat === 'Tables') dbTables[saved.db] = items;
+      if (cat === 'Views') dbViews[saved.db] = items;
+    }
+  }
+  // Expand the database node in the sidebar. Setting `open` fires the node's
+  // (async) toggle handler; `pendingRestoreDb` tells it not to auto-select the
+  // db so the deeper selection applied below survives.
+  const summary = document.querySelector('.db-summary[data-db="' + (window.CSS && CSS.escape ? CSS.escape(saved.db) : saved.db) + '"]');
+  if (summary && summary.parentElement) {
+    pendingRestoreDb = saved.db;
+    summary.parentElement.open = true;
+  }
+  // Re-apply the deeper selection last so it isn't clobbered by the expand.
+  if (saved.kind === 'view') {
+    const v = (dbViews[saved.db] || []).find(x => x.name === saved.name) || { name: saved.name, schemaName: 'dbo' };
+    selectView(saved.db, v);
+  } else if (saved.kind === 'object') {
+    selectObject(saved.db, { name: saved.name });
+  } else if (saved.name) {
+    const t = (dbTables[saved.db] || []).find(x => x.name === saved.name) || { name: saved.name, schemaName: 'dbo' };
+    selectTable(saved.db, t);
+  } else {
+    selectDb(saved.db);
+  }
+}
+
+// Creates a styled filter input (does not itself filter anything).
+function makeFilter(placeholder) {
+  const filter = document.createElement('input');
+  filter.type = 'text';
+  filter.placeholder = placeholder;
+  filter.className = 'input input-sm mb-2 w-full';
+  filter.addEventListener('click', e => e.stopPropagation()); // don't toggle <details>
+  return filter;
+}
+
+function dbNode(db) {
+  const d = document.createElement('details');
+  d.className = 'collapse collapse-arrow border border-base-300 bg-base-100 rounded-box';
+  const summary = document.createElement('summary');
+  summary.className = 'db-summary collapse-title flex items-center gap-2 font-medium border border-green-500 bg-green-500/10 rounded-lg text-base-content';
+  summary.dataset.db = db;
+  summary.appendChild(icon('database'));
+  const dbName = document.createElement('span');
+  dbName.textContent = db;
+  summary.appendChild(dbName);
+  const content = document.createElement('div');
+  content.className = 'collapse-content space-y-2';
+  d.appendChild(summary);
+  d.appendChild(content);
+  summary.addEventListener('click', () => selectDb(db));
+  let loaded = false;
+  d.addEventListener('toggle', async () => {
+    if (!d.open) return;
+    // During context restore the deeper selection (table/view) is applied
+    // separately; skip the db-level auto-select once so it isn't clobbered.
+    if (pendingRestoreDb === db) { pendingRestoreDb = null; } else { selectDb(db); }
+    if (loaded) return;
+    loaded = true;
+    const data = await api('objects', { connectionString: CS, database: db });
+    if (!data.ok) { content.innerHTML = '<div role="alert" class="alert alert-error alert-soft">' + data.error + '</div>'; return; }
+    dbCounts[db] = {};
+    for (const [cat, items] of Object.entries(data.categories)) {
+      dbCounts[db][cat] = items.length;
+      if (cat === 'Tables') dbTables[db] = items;
+      if (cat === 'Views') dbViews[db] = items;
+      content.appendChild(categoryNode(cat, items, db));
+    }
+    refreshIcons();
+    if (currentDb === db && !currentTable) renderInfo();
+  });
+  return d;
+}
+
+// A single selectable table/view/object row. `offset` is the number of leading
+// characters (the consumed group prefix) to hide from the displayed name;
+// selection and filtering still use the full name.
+function itemRow(cat, item, db, offset) {
+  const showCounts = (cat === 'Tables' || cat === 'Views');
+  const label = document.createElement('label');
+  label.className = 'item-row flex items-center gap-2 rounded px-2 py-1 hover:bg-base-200 cursor-pointer';
+  label.dataset.name = item.name;                 // filter on the raw name only
+  label.appendChild(icon(CAT_ICONS[cat] || 'file'));
+  let display = item.name.slice(offset || 0).replace(/^_+/, '');
+  if (!display) display = item.name;
+  const name = document.createElement('span');
+  name.textContent = display;
+  label.appendChild(name);
+  if (showCounts && item.rowCount > 0) {
+    const badge = document.createElement('span');
+    badge.className = 'badge badge-sm badge-ghost';
+    badge.textContent = item.rowCount.toLocaleString();
+    label.appendChild(badge);
+  }
+  label.addEventListener('click', () => {
+    if (cat === 'Tables') selectTable(db, item);
+    else if (cat === 'Views') selectView(db, item);
+    else if (cat === 'Stored Procedures' || cat === 'Functions' || cat === 'Triggers') selectObject(db, item);
+    else selectDb(db);
+  });
+  return label;
+}
+
+// Prefix used to group items: text before the first underscore,
+// otherwise the leading camel/Pascal-case token.
+function prefixOf(name) {
+  const i = name.indexOf('_');
+  if (i > 0) return name.slice(0, i);
+  const m = name.match(/^[A-Za-z][a-z0-9]*/);
+  return m ? m[0] : name;
+}
+
+// Longest common prefix shared by a list of strings.
+function commonPrefix(strings) {
+  if (!strings.length) return '';
+  let p = strings[0];
+  for (let i = 1; i < strings.length && p; i++) {
+    const s = strings[i];
+    let j = 0;
+    while (j < p.length && j < s.length && p[j] === s[j]) j++;
+    p = p.slice(0, j);
+  }
+  return p;
+}
+
+// A collapsible group of rows sharing a name prefix. `offset` is the number of
+// leading characters already consumed by parent groups; `segment` is this group's label.
+function prefixGroupNode(cat, segment, items, db, offset) {
+  const g = document.createElement('details');
+  g.className = 'collapse collapse-arrow border border-base-300 bg-base-100 rounded-box group-node';
+  g.dataset.name = segment;
+  const summary = document.createElement('summary');
+  summary.className = 'collapse-title flex items-center gap-2 font-medium border border-orange-500 bg-orange-500/10 rounded-lg text-base-content';
+  const label = document.createElement('span');
+  label.textContent = '(' + segment + ')';
+  const badge = document.createElement('span');
+  badge.className = 'badge badge-sm bg-orange-900 text-white border-none';
+  badge.textContent = items.length;
+  summary.appendChild(icon('folder'));
+  summary.appendChild(label);
+  summary.appendChild(badge);
+  const content = document.createElement('div');
+  content.className = 'collapse-content';
+  renderItems(content, cat, items, db, offset);
+  g.appendChild(summary);
+  g.appendChild(content);
+  return g;
+}
+
+// Renders items into `container`, grouping by the next name segment when the
+// list is long. Groups with a single item are shown as a plain row (no group).
+function renderItems(container, cat, items, db, offset) {
+  offset = offset || 0;
+  if (items.length <= 3) {
+    items.forEach(item => container.appendChild(itemRow(cat, item, db, offset)));
+    return;
+  }
+  const groups = {};
+  items.forEach(item => {
+    const seg = prefixOf(item.name.slice(offset).replace(/^_+/, ''));
+    (groups[seg] = groups[seg] || []).push(item);
+  });
+  Object.keys(groups).sort().forEach(seg => {
+    const gi = groups[seg];
+    if (gi.length === 1) {
+      container.appendChild(itemRow(cat, gi[0], db, offset));
+      return;
+    }
+    // The group's label/prefix is the longest common prefix of its members
+    // (from `offset`), so e.g. "abaBPM..." collapses to a "BPM" group.
+    const rests = gi.map(it => {
+      const sliced = it.name.slice(offset);
+      const stripped = sliced.replace(/^_+/, '');
+      return { lead: sliced.length - stripped.length, rest: stripped };
+    });
+    const label = commonPrefix(rests.map(r => r.rest)) || seg;
+    const consumed = offset + rests[0].lead + label.length;
+    if (consumed <= offset) {
+      gi.forEach(item => container.appendChild(itemRow(cat, item, db, offset)));
+    } else {
+      // Display the full cumulative prefix (from the start of the name) so
+      // nested groups keep the parent group's text instead of stripping it.
+      const fullLabel = gi[0].name.slice(0, consumed);
+      container.appendChild(prefixGroupNode(cat, fullLabel, gi, db, consumed));
+    }
+  });
+}
+
+function categoryNode(cat, items, db) {
+  const d = document.createElement('details');
+  d.className = 'collapse collapse-arrow border border-base-300 bg-base-100 rounded-box cat-node';
+  d.dataset.name = cat;
+
+  const summary = document.createElement('summary');
+  summary.className = 'collapse-title flex items-center gap-2 font-medium';
+  summary.appendChild(icon(CAT_ICONS[cat] || 'file'));
+  const catLabel = document.createElement('span');
+  catLabel.textContent = cat;
+  summary.appendChild(catLabel);
+  const catBadge = document.createElement('span');
+  catBadge.className = 'badge badge-sm badge-ghost';
+  catBadge.textContent = items.length;
+  summary.appendChild(catBadge);
+
+  const content = document.createElement('div');
+  content.className = 'collapse-content';
+
+  // Filter box: while typing we show a flat filtered list; grouping is used
+  // only when the filter is empty.
+  const filter = makeFilter('filter ' + cat.toLowerCase() + '...');
+  content.appendChild(filter);
+
+  const grouped = document.createElement('div');
+  grouped.className = 'space-y-2';
+  const flat = document.createElement('div');
+  flat.className = 'space-y-1';
+  flat.style.display = 'none';
+  content.appendChild(grouped);
+  content.appendChild(flat);
+
+  const groupable = (cat === 'Tables' || cat === 'Views');
+  if (groupable) {
+    renderItems(grouped, cat, items, db, 0);
+  } else {
+    items.forEach(item => grouped.appendChild(itemRow(cat, item, db, 0)));
+  }
+
+  let flatBuilt = false;
+  filter.addEventListener('input', () => {
+    const term = filter.value.trim().toLowerCase();
+    if (!term) {
+      grouped.style.display = '';
+      flat.style.display = 'none';
+      return;
+    }
+    if (!flatBuilt) {
+      items.forEach(item => flat.appendChild(itemRow(cat, item, db, 0)));
+      flatBuilt = true;
+      refreshIcons();
+    }
+    grouped.style.display = 'none';
+    flat.style.display = '';
+    flat.querySelectorAll('.item-row').forEach(el => {
+      el.style.display = el.dataset.name.toLowerCase().includes(term) ? '' : 'none';
+    });
+  });
+
+  d.appendChild(summary);
+  d.appendChild(content);
+  return d;
+}
+</script>
+</body>
+</html>
