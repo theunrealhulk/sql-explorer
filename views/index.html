@@ -55,6 +55,36 @@ html[data-theme="dark"] .jsoneditor-value.jsoneditor-number { color: #f87171; }
 html[data-theme="dark"] .jsoneditor-value.jsoneditor-boolean { color: #fb923c; }
 html[data-theme="dark"] .jsoneditor-value.jsoneditor-null { color: #60a5fa; }
 html[data-theme="dark"] .jsoneditor-value.jsoneditor-invalid { color: #e5e7eb; }
+
+/* Subtle dashed separators (sidebar resizer + editor/results splitter). */
+:root { --sep-color: rgba(0, 0, 0, 0.3); }
+html[data-theme="dark"] { --sep-color: rgba(255, 255, 255, 0.28); }
+.dashed-sep-v {
+  background-image: repeating-linear-gradient(to bottom, var(--sep-color) 0 5px, transparent 5px 10px);
+  background-size: 2px 100%;
+  background-position: center;
+  background-repeat: no-repeat;
+}
+.dashed-sep-h {
+  background-image: repeating-linear-gradient(to right, var(--sep-color) 0 5px, transparent 5px 10px);
+  background-size: 100% 2px;
+  background-position: center;
+  background-repeat: no-repeat;
+}
+.dashed-sep-v:hover, .dashed-sep-h:hover, .dashed-sep-active { --sep-color: var(--color-primary); }
+
+/* Settings JSON syntax highlighting (theme-aware). */
+.json-key { color: #0550ae; }
+.json-str { color: #0a7d33; }
+.json-num { color: #b5330a; }
+.json-bool { color: #953800; }
+.json-null { color: #6639ba; }
+html[data-theme="dark"] .json-key { color: #79c0ff; }
+html[data-theme="dark"] .json-str { color: #7ee787; }
+html[data-theme="dark"] .json-num { color: #ff7b72; }
+html[data-theme="dark"] .json-bool { color: #ffa657; }
+html[data-theme="dark"] .json-null { color: #d2a8ff; }
+.json-error { text-decoration: underline wavy #ef4444; text-decoration-skip-ink: none; }
 </style>
 </head>
 <body class="bg-base-200 min-h-screen">
@@ -78,9 +108,12 @@ html[data-theme="dark"] .jsoneditor-value.jsoneditor-invalid { color: #e5e7eb; }
           <i data-lucide="sun" class="swap-off size-5"></i>
           <i data-lucide="moon" class="swap-on size-5"></i>
         </label>
+        <button id="settings-btn" type="button" aria-label="Settings" class="btn btn-ghost btn-circle" onclick="openSettings()">
+          <i data-lucide="settings" class="size-5"></i>
+        </button>
       </div>
 
-      <main class="flex-1 space-y-4 p-4">
+      <main id="main-content" class="flex-1 space-y-4 rounded-lg border-2 border-base-300 p-4">
         <div class="flex items-center gap-2">
           <div class="join">
             <button id="nav-back" class="btn btn-sm btn-ghost join-item" title="Back" disabled onclick="goBack()"><i data-lucide="arrow-left" class="size-4"></i></button>
@@ -108,10 +141,48 @@ html[data-theme="dark"] .jsoneditor-value.jsoneditor-invalid { color: #e5e7eb; }
           <button onclick="connect()" class="btn btn-primary btn-sm btn-block"><i data-lucide="plug" class="size-4"></i>Connect</button>
         </div>
         <div id="tree" class="space-y-2"></div>
-        <div id="sidebar-resizer" class="absolute top-0 right-0 z-10 h-full w-1.5 cursor-col-resize hover:bg-primary/40 active:bg-primary/60"></div>
+        <div id="sidebar-resizer" class="dashed-sep-v absolute top-0 right-0 z-10 h-full w-1.5 cursor-col-resize"></div>
       </aside>
     </div>
   </div>
+
+  <!-- Settings modal -->
+  <dialog id="settings-modal" class="modal">
+    <div class="modal-box max-w-2xl">
+      <h3 class="text-lg font-bold flex items-center gap-2"><i data-lucide="settings" class="size-5"></i>Settings</h3>
+      <div role="tablist" class="tabs tabs-lift mt-4">
+        <input type="radio" name="settings-tabs" role="tab" class="tab" aria-label="Settings" checked />
+        <div role="tabpanel" class="tab-content border-base-300 bg-base-100 p-4">
+          <div id="settings-main" class="space-y-1"></div>
+        </div>
+        <input type="radio" name="settings-tabs" role="tab" class="tab" aria-label="JSON" />
+        <div role="tabpanel" class="tab-content border-base-300 bg-base-100 p-4">
+          <div class="mb-2 flex items-center justify-between">
+            <button id="settings-json-save" type="button" class="btn btn-primary btn-sm" disabled onclick="saveSettingsJson()">
+              <i data-lucide="save" class="size-4"></i>Save
+            </button>
+            <div class="flex gap-1">
+              <button type="button" class="btn btn-ghost btn-sm btn-square tooltip tooltip-left" data-tip="Copy" onclick="copySettingsJson(this)">
+                <i data-lucide="copy" class="size-4"></i>
+              </button>
+              <button type="button" class="btn btn-ghost btn-sm btn-square tooltip tooltip-left" data-tip="Download" onclick="downloadSettingsJson()">
+                <i data-lucide="download" class="size-4"></i>
+              </button>
+            </div>
+          </div>
+          <pre class="max-h-96 overflow-auto rounded bg-base-200 p-3 text-xs"><code id="settings-json-code" contenteditable="true" spellcheck="false" class="block outline-none"></code></pre>
+        </div>
+      </div>
+      <div class="modal-action">
+        <form method="dialog">
+          <button class="btn">Close</button>
+        </form>
+      </div>
+    </div>
+    <form method="dialog" class="modal-backdrop">
+      <button aria-label="Close">close</button>
+    </form>
+  </dialog>
 
 <script>
 let CS = '';
@@ -185,6 +256,7 @@ function loadTabs() {
 }
 
 function saveTabs() {
+  if (window.saveEnabled && !window.saveEnabled('tabs')) return;
   try {
     localStorage.setItem('sql-explorer-tabs', JSON.stringify({
       tabs: tabs.map(t => ({ id: t.id, context: t.context })),
@@ -193,6 +265,10 @@ function saveTabs() {
   } catch (e) { /* ignore */ }
 }
 
+// Distinct per-tab accent colors (stable per tab id, cycled).
+const TAB_COLORS = ['#f97316', '#22c55e', '#3b82f6', '#a855f7', '#ec4899', '#14b8a6', '#eab308', '#ef4444', '#06b6d4', '#8b5cf6'];
+function tabColor(id) { return TAB_COLORS[(Math.abs(id) - 1) % TAB_COLORS.length]; }
+
 // Renders the tab strip next to the title plus the trailing "new tab" button.
 function renderTabs() {
   const bar = document.getElementById('db-tabs');
@@ -200,8 +276,15 @@ function renderTabs() {
   bar.innerHTML = '';
   tabs.forEach(tab => {
     const isActive = tab.id === activeTabId;
+    const color = tabColor(tab.id);
     const btn = document.createElement('button');
-    btn.className = 'btn btn-sm ' + (isActive ? 'btn-active' : 'btn-ghost');
+    btn.className = 'btn btn-sm ' + (isActive ? '' : 'btn-ghost');
+    // Colored text always; active tabs become outlined in the same color.
+    btn.style.color = color;
+    if (isActive) {
+      btn.style.backgroundColor = 'transparent';
+      btn.style.borderColor = color;
+    }
     const label = document.createElement('span');
     const dbName = isActive ? currentDb : (tab.context && tab.context.db);
     label.textContent = dbName || 'Server';
@@ -223,6 +306,9 @@ function renderTabs() {
   add.appendChild(icon('plus'));
   add.addEventListener('click', newTab);
   bar.appendChild(add);
+  // Match the main content border to the active tab's color.
+  const main = document.getElementById('main-content');
+  if (main) main.style.borderColor = tabColor(activeTabId);
   refreshIcons();
 }
 
@@ -656,6 +742,311 @@ function initTheme() {
     document.documentElement.setAttribute('data-theme', next);
     localStorage.setItem('theme', next);
   });
+}
+
+// Opens the settings modal.
+let _settingsJsonOriginal = '';
+function openSettings() {
+  renderSettingsMain();
+  renderSettingsJson();
+  const modal = document.getElementById('settings-modal');
+  if (modal) modal.showModal();
+  refreshIcons();
+}
+
+// Every kind of information the app can persist, as a tree. A count of 0 just
+// means nothing of that category is currently saved.
+function settingsTree() {
+  const keys = Object.keys(localStorage);
+  const byPrefix = (p) => keys.filter(k => k.startsWith(p));
+  const objLen = (k, prop) => {
+    try {
+      const o = JSON.parse(localStorage.getItem(k) || 'null');
+      if (!o) return 0;
+      const v = prop ? o[prop] : o;
+      if (Array.isArray(v)) return v.length;
+      return typeof v === 'object' ? Object.keys(v).length : 1;
+    } catch (e) { return 0; }
+  };
+
+  const dbTablesKeys = byPrefix('sql-explorer-dbtables:');
+  const dbSqlKeys = keys.filter(k => /^sql-tab:[^:]*:db$/.test(k));
+  const tableStateKeys = byPrefix('sql-explorer-tablestate:');
+  const tableSqlKeys = keys.filter(k => /^sql-tab:[^:]*:t:/.test(k));
+
+  const dbSet = new Set();
+  dbTablesKeys.forEach(k => dbSet.add(k.slice('sql-explorer-dbtables:'.length)));
+  try { const o = JSON.parse(localStorage.getItem('sql-explorer-relstate') || 'null'); if (o) Object.keys(o).forEach(d => dbSet.add(d)); } catch (e) { /* ignore */ }
+  dbSqlKeys.forEach(k => { const m = k.match(/^sql-tab:([^:]*):db$/); if (m) dbSet.add(m[1]); });
+
+  const tableSet = new Set();
+  tableStateKeys.forEach(k => tableSet.add(k.slice('sql-explorer-tablestate:'.length)));
+  tableSqlKeys.forEach(k => { const m = k.match(/^sql-tab:([^:]*):t:(.+)$/); if (m) tableSet.add(m[1] + '.' + m[2]); });
+
+  return {
+    id: 'tabs', label: 'Open tabs', count: objLen('sql-explorer-tabs', 'tabs'),
+    children: [
+      {
+        id: 'database', label: 'Database', count: dbSet.size,
+        children: [
+          { id: 'dbTables', label: 'Tables list', count: dbTablesKeys.length },
+          { id: 'dbRelations', label: 'Relations', count: objLen('sql-explorer-relstate') },
+          { id: 'dbSql', label: 'SQL editor', count: dbSqlKeys.length },
+          {
+            id: 'tables', label: 'Tables', count: tableSet.size,
+            children: [
+              { id: 'tableData', label: 'Data', count: tableStateKeys.length },
+              { id: 'tableRelations', label: 'Table relations', count: 0 },
+              { id: 'tableSql', label: 'SQL editor', count: tableSqlKeys.length },
+            ],
+          },
+        ],
+      },
+    ],
+  };
+}
+
+// Categories whose save sites honour the enable/disable toggle.
+const SETTINGS_GUARDABLE = new Set(['tabs', 'dbTables', 'dbRelations', 'dbSql', 'tableData', 'tableRelations', 'tableSql']);
+
+function saveDisabledSet() {
+  try { return new Set(JSON.parse(localStorage.getItem('sql-explorer-save-disabled') || '[]')); }
+  catch (e) { return new Set(); }
+}
+function persistSaveDisabled(set) {
+  try { localStorage.setItem('sql-explorer-save-disabled', JSON.stringify([...set])); }
+  catch (e) { /* ignore */ }
+}
+// Guard consulted by every persistence site: false means "don't save".
+window.saveEnabled = function (id) { return !saveDisabledSet().has(id); };
+
+// Guardable category ids within a node's subtree (including the node itself).
+function settingsGuardableIds(node) {
+  const out = [];
+  const walk = (n) => { if (SETTINGS_GUARDABLE.has(n.id)) out.push(n.id); (n.children || []).forEach(walk); };
+  walk(node);
+  return out;
+}
+
+// Renders the "Settings" tab: an indented tree with a checkbox + item count per
+// line. Checked = the category is saved; unchecking stops it being saved.
+function renderSettingsMain() {
+  const host = document.getElementById('settings-main');
+  if (!host) return;
+  host.innerHTML = '';
+  const disabled = saveDisabledSet();
+  const rows = [];
+  const walk = (node, depth) => { rows.push({ node, depth }); (node.children || []).forEach(c => walk(c, depth + 1)); };
+  walk(settingsTree(), 0);
+
+  rows.forEach(({ node, depth }) => {
+    const line = document.createElement('label');
+    line.className = 'label flex w-full cursor-pointer justify-start gap-2';
+    line.style.paddingLeft = (depth * 1.5) + 'rem';
+
+    const ids = settingsGuardableIds(node);
+    const off = ids.filter(id => disabled.has(id)).length;
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.className = 'checkbox checkbox-sm';
+    cb.checked = off === 0;
+    cb.indeterminate = off > 0 && off < ids.length;
+    cb.addEventListener('change', () => {
+      const set = saveDisabledSet();
+      ids.forEach(id => { if (cb.checked) set.delete(id); else set.add(id); });
+      persistSaveDisabled(set);
+      renderSettingsMain();
+    });
+
+    const span = document.createElement('span');
+    span.className = 'label-text';
+    span.append(node.label + ' : ');
+    const n = document.createElement('span');
+    n.className = 'font-mono font-bold';
+    n.textContent = String(node.count);
+    span.appendChild(n);
+
+    line.append(cb, span);
+    host.appendChild(line);
+  });
+}
+
+// Aggregates all localStorage entries, parsing JSON values where possible.
+function settingsStoredData() {
+  const out = {};
+  for (let i = 0; i < localStorage.length; i++) {
+    const k = localStorage.key(i);
+    const raw = localStorage.getItem(k);
+    try { out[k] = JSON.parse(raw); } catch (e) { out[k] = raw; }
+  }
+  return out;
+}
+
+function settingsJsonText() {
+  return JSON.stringify(settingsStoredData(), null, 2);
+}
+
+// Wraps JSON tokens in colored spans for syntax highlighting (HTML-escaped).
+function highlightJson(json) {
+  json = json.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return json.replace(/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false)\b|\bnull\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g, (match) => {
+    let cls = 'json-num';
+    if (/^"/.test(match)) cls = /:$/.test(match) ? 'json-key' : 'json-str';
+    else if (/^(true|false)$/.test(match)) cls = 'json-bool';
+    else if (match === 'null') cls = 'json-null';
+    return '<span class="' + cls + '">' + match + '</span>';
+  });
+}
+
+// Renders the "JSON" tab with the pretty-printed localStorage contents.
+function renderSettingsJson() {
+  const code = document.getElementById('settings-json-code');
+  if (!code) return;
+  const text = settingsJsonText();
+  _settingsJsonOriginal = text;
+  code.textContent = text;
+  if (!code.dataset.wired) {
+    code.dataset.wired = '1';
+    code.addEventListener('input', () => paintSettingsJson(true));
+    code.addEventListener('blur', () => paintSettingsJson(false));
+    // Keep the editor plain-text so newlines/paste stay as text (not markup).
+    code.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); document.execCommand('insertText', false, '\n'); }
+    });
+    code.addEventListener('paste', (e) => {
+      e.preventDefault();
+      const t = (e.clipboardData || window.clipboardData).getData('text');
+      document.execCommand('insertText', false, t);
+    });
+  }
+  paintSettingsJson(false);
+}
+
+function escapeHtml(s) {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+// Returns null when `text` is valid JSON, else { pos } with the character offset
+// of the error (pos = -1 when the message carries no position).
+function jsonError(text) {
+  try { JSON.parse(text); return null; }
+  catch (e) {
+    const m = /position (\d+)/.exec(e.message || '');
+    return { pos: m ? Math.min(parseInt(m[1], 10), text.length) : -1 };
+  }
+}
+
+// Highlighted HTML with a red-squiggle span around the single character at the
+// error position (or the whole text when the position is unknown).
+function jsonErrorHtml(text, pos) {
+  if (pos < 0) return '<span class="json-error">' + escapeHtml(text) + '</span>';
+  const start = Math.min(pos, Math.max(text.length - 1, 0));
+  const before = escapeHtml(text.slice(0, start));
+  const mark = escapeHtml(text.slice(start, start + 1)) || ' ';
+  const after = escapeHtml(text.slice(start + 1));
+  return before + '<span class="json-error">' + mark + '</span>' + after;
+}
+
+// Character offset of the caret within `el` (null when there is no selection).
+function caretOffset(el) {
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0 || !el.contains(sel.anchorNode)) return null;
+  const range = sel.getRangeAt(0).cloneRange();
+  const pre = range.cloneRange();
+  pre.selectNodeContents(el);
+  pre.setEnd(range.endContainer, range.endOffset);
+  return pre.toString().length;
+}
+
+// Places the caret at character offset `offset` within `el`.
+function setCaretOffset(el, offset) {
+  if (offset == null) return;
+  const sel = window.getSelection();
+  const range = document.createRange();
+  let remaining = offset;
+  let placed = false;
+  const walk = (node) => {
+    if (placed) return;
+    if (node.nodeType === 3) {
+      const len = node.textContent.length;
+      if (remaining <= len) { range.setStart(node, remaining); placed = true; }
+      else remaining -= len;
+    } else {
+      node.childNodes.forEach(walk);
+    }
+  };
+  walk(el);
+  if (!placed) { range.selectNodeContents(el); range.collapse(false); }
+  else range.collapse(true);
+  sel.removeAllRanges();
+  sel.addRange(range);
+}
+
+// Re-renders the editor: syntax colors when valid, a positioned red squiggle
+// when not. Restores the caret so live editing isn't disrupted.
+function paintSettingsJson(preserveCaret) {
+  const code = document.getElementById('settings-json-code');
+  if (!code) return;
+  const text = code.textContent;
+  const off = preserveCaret ? caretOffset(code) : null;
+  const err = text.trim() === '' ? null : jsonError(text);
+  if (!err) code.innerHTML = text === '' ? '' : highlightJson(text);
+  else code.innerHTML = jsonErrorHtml(text, err.pos);
+  if (preserveCaret) setCaretOffset(code, off);
+  updateSettingsSaveState();
+}
+
+// Enables the Save button only when the text changed and is a valid JSON object.
+function updateSettingsSaveState() {
+  const code = document.getElementById('settings-json-code');
+  const btn = document.getElementById('settings-json-save');
+  if (!code || !btn) return;
+  const text = code.textContent;
+  let valid = false;
+  try { const o = JSON.parse(text); valid = !!o && typeof o === 'object' && !Array.isArray(o); }
+  catch (e) { valid = false; }
+  btn.disabled = !(text !== _settingsJsonOriginal && valid);
+}
+
+// Persists the edited JSON back to localStorage and refreshes the views.
+function saveSettingsJson() {
+  const code = document.getElementById('settings-json-code');
+  if (!code) return;
+  importSettingsData(code.textContent);
+}
+
+function copySettingsJson(btn) {
+  const text = settingsJsonText();
+  navigator.clipboard.writeText(text).then(() => {
+    if (!btn) return;
+    const prev = btn.getAttribute('data-tip');
+    btn.setAttribute('data-tip', 'Copied!');
+    setTimeout(() => btn.setAttribute('data-tip', prev), 1200);
+  });
+}
+
+function downloadSettingsJson() {
+  const blob = new Blob([settingsJsonText()], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'sql-explorer-settings.json';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+// Writes an imported settings object (key -> value) back into localStorage.
+function importSettingsData(text) {
+  let obj;
+  try { obj = JSON.parse(text); } catch (e) { alert('Invalid JSON.'); return; }
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) { alert('Expected a JSON object.'); return; }
+  Object.entries(obj).forEach(([k, v]) => {
+    try { localStorage.setItem(k, typeof v === 'string' ? v : JSON.stringify(v)); } catch (e) { /* ignore */ }
+  });
+  renderSettingsMain();
+  renderSettingsJson();
 }
 
 async function api(path, body) {
