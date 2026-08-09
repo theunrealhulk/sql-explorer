@@ -26,6 +26,7 @@ try {
 
 // Serializes DB_REL_STATE (Sets -> arrays) to localStorage.
 function persistRelState() {
+  if (window.saveEnabled && !window.saveEnabled('dbRelations')) return;
   try {
     const obj = {};
     for (const [db, s] of DB_REL_STATE) {
@@ -58,6 +59,7 @@ class DbDetails extends HTMLElement {
 
   connectedCallback() {
     this.renderShell();
+    this.loadTablesState();
     this.buildTablesPanel();
     this.loadTables();
     if ((localStorage.getItem('db-tab') || 'Tables') === 'Relations') this.loadRelations();
@@ -89,6 +91,36 @@ class DbDetails extends HTMLElement {
       body: JSON.stringify(body),
     });
     return res.json();
+  }
+
+  // Persist the Tables tab's filter/sort/pagination per database so the view is
+  // restored after a full page refresh.
+  tablesStateKey() { return 'sql-explorer-dbtables:' + this.database; }
+
+  loadTablesState() {
+    try {
+      const raw = localStorage.getItem(this.tablesStateKey());
+      if (!raw) return;
+      const s = JSON.parse(raw);
+      if (typeof s.filter === 'string') this.filter = s.filter;
+      if (typeof s.sortKey === 'string') this.sortKey = s.sortKey;
+      if (s.sortDir === 'ASC' || s.sortDir === 'DESC') this.sortDir = s.sortDir;
+      if (Number.isInteger(s.page) && s.page > 0) this.page = s.page;
+      if ([20, 50, 100, 200, 500].includes(s.pageSize)) this.pageSize = s.pageSize;
+    } catch (_) { /* ignore corrupt state */ }
+  }
+
+  saveTablesState() {
+    if (window.saveEnabled && !window.saveEnabled('dbTables')) return;
+    try {
+      localStorage.setItem(this.tablesStateKey(), JSON.stringify({
+        filter: this.filter,
+        sortKey: this.sortKey,
+        sortDir: this.sortDir,
+        page: this.page,
+        pageSize: this.pageSize,
+      }));
+    } catch (_) { /* ignore quota/serialisation errors */ }
   }
 
   renderShell() {
@@ -190,6 +222,7 @@ class DbDetails extends HTMLElement {
   async loadTables() {
     const target = this.results();
     if (!target) return;
+    this.saveTablesState();
     this.info(target, 'Loading tables…');
     const d = await this.api('tables', {
       connectionString: this.cs,
