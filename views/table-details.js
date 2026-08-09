@@ -16,10 +16,15 @@ class TableDetails extends HTMLElement {
     this.caseSensitive = false;
     this._searchTimer = null;
     this._jsonEditor = null;
+    this._jsonCollapsed = new Set();
+    this._jsonSearch = '';
     this._lastData = null;
     this._colFilter = '';
     this._colMenuOpen = false;
     this._colFilters = {};
+    this._structColFilters = {};
+    this._structSortCol = null;
+    this._structSortDir = 1;
     this._uid = 'td-' + Math.random().toString(36).slice(2);
   }
 
@@ -77,6 +82,9 @@ class TableDetails extends HTMLElement {
     this._colFilter = '';
     this._colMenuOpen = false;
     this._colFilters = {};
+    this._structColFilters = {};
+    this._structSortCol = null;
+    this._structSortDir = 1;
     if (this._sqlCtrl) { this._sqlCtrl.destroy(); this._sqlCtrl = null; }
     this._sqlTab = false;
     this.renderShell();
@@ -111,6 +119,11 @@ class TableDetails extends HTMLElement {
     this.search = '';
     this.fuzzy = false;
     this.caseSensitive = false;
+    this._structColFilters = {};
+    this._structSortCol = null;
+    this._structSortDir = 1;
+    this._jsonCollapsed = new Set();
+    this._jsonSearch = '';
     try {
       const raw = localStorage.getItem(this.stateKey());
       if (!raw) return;
@@ -122,10 +135,16 @@ class TableDetails extends HTMLElement {
       if (typeof s.search === 'string') this.search = s.search;
       if (typeof s.fuzzy === 'boolean') this.fuzzy = s.fuzzy;
       if (typeof s.caseSensitive === 'boolean') this.caseSensitive = s.caseSensitive;
+      if (s.structFilters && typeof s.structFilters === 'object') this._structColFilters = s.structFilters;
+      if (typeof s.structSortCol === 'string') this._structSortCol = s.structSortCol;
+      if (s.structSortDir === -1 || s.structSortDir === 1) this._structSortDir = s.structSortDir;
+      if (Array.isArray(s.jsonCollapsed)) this._jsonCollapsed = new Set(s.jsonCollapsed);
+      if (typeof s.jsonSearch === 'string') this._jsonSearch = s.jsonSearch;
     } catch (_) { /* ignore corrupt state */ }
   }
 
   saveTableState() {
+    if (window.saveEnabled && !window.saveEnabled('tableData')) return;
     try {
       localStorage.setItem(this.stateKey(), JSON.stringify({
         hidden: [...this.hiddenColumns],
@@ -135,6 +154,11 @@ class TableDetails extends HTMLElement {
         search: this.search,
         fuzzy: this.fuzzy,
         caseSensitive: this.caseSensitive,
+        structFilters: this._structColFilters,
+        structSortCol: this._structSortCol,
+        structSortDir: this._structSortDir,
+        jsonCollapsed: [...this._jsonCollapsed],
+        jsonSearch: this._jsonSearch,
       }));
     } catch (_) { /* ignore quota/serialisation errors */ }
   }
@@ -635,8 +659,48 @@ class TableDetails extends HTMLElement {
       mainMenuBar: true,
       navigationBar: false,
       search: true,
+      // Remember which nodes the user collapses (expand-all is the default).
+      onExpand: ({ path, isExpand, recursive }) => {
+        const key = JSON.stringify(path);
+        if (recursive) {
+          for (const k of [...this._jsonCollapsed]) {
+            if (this.jsonHasPrefix(JSON.parse(k), path)) this._jsonCollapsed.delete(k);
+          }
+        }
+        if (isExpand) this._jsonCollapsed.delete(key);
+        else this._jsonCollapsed.add(key);
+        this.saveTableState();
+      },
     });
     this._jsonEditor.set(data);
+    this.restoreJsonView();
+  }
+
+  // True when `path` starts with `prefix` (prefix being a shorter/equal path).
+  jsonHasPrefix(path, prefix) {
+    if (prefix.length > path.length) return false;
+    return prefix.every((v, i) => path[i] === v);
+  }
+
+  // Default to expand-all, then re-apply any saved collapsed nodes and the
+  // remembered search value.
+  restoreJsonView() {
+    if (!this._jsonEditor) return;
+    this._jsonEditor.expandAll();
+    this._jsonCollapsed.forEach(key => {
+      try { this._jsonEditor.expand({ path: JSON.parse(key), isExpand: false, recursive: false }); } catch (_) { /* stale path */ }
+    });
+    const sb = this._jsonEditor.searchBox;
+    if (sb && sb.dom && sb.dom.search) {
+      if (this._jsonSearch) {
+        sb.dom.search.value = this._jsonSearch;
+        this._jsonEditor.search(this._jsonSearch);
+      }
+      sb.dom.search.addEventListener('input', () => {
+        this._jsonSearch = sb.dom.search.value;
+        this.saveTableState();
+      });
+    }
   }
 
   // Inline row of checkboxes to toggle column visibility.
@@ -866,20 +930,74 @@ class TableDetails extends HTMLElement {
   // ---- Structure tab -----------------------------------------------------
   async loadStructure() {
     const target = this.panel('structure');
-    this.info(target, 'Loading structure…');
+    if (!target) return;
+    this.buildStructurePanel();
+    const results = target.querySelector('[data-struct-results]');
+    this.info(results, 'Loading structure…');
     const d = await this.api('columns', {
       connectionString: this.cs,
       database: this.database,
       schema: this.schema,
       table: this.table,
     });
-    if (!d.ok) { this.error(target, d.error); return; }
-    this.renderStructure(target, d.columns);
+    if (!d.ok) { this.error(results, d.error); return; }
+    this._structColumns = d.columns || [];
+    this.renderStructure();
   }
 
-  renderStructure(target, columns) {
+  // Builds the results container once; the per-column filter funnels live in
+  // the table headers rendered by renderStructure (mirrors the Data tab).
+  buildStructurePanel() {
+    const target = this.panel('structure');
+    if (!target) return;
     target.innerHTML = '';
-    if (!columns.length) { this.info(target, 'No columns.'); return; }
+    const results = document.createElement('div');
+    results.setAttribute('data-struct-results', '');
+    target.appendChild(results);
+  }
+
+  // Structure columns, each with a stable key and a value accessor used for
+  // both the per-column filter and sorting.
+  structDefs() {
+    return [
+      { key: 'name', label: 'Column', text: col => col.name || '' },
+      { key: 'type', label: 'Type', text: col => col.type || '' },
+      { key: 'nullable', label: 'Nullable', text: col => (col.isNullable ? 'YES' : 'NO') },
+      { key: 'keys', label: 'Key', text: col => [
+        col.isPrimaryKey ? 'PK' : '',
+        col.isForeignKey ? 'FK' : '',
+        (!col.isPrimaryKey && col.isUnique) ? 'Unique' : '',
+      ].filter(Boolean).join(' ') },
+    ];
+  }
+
+  renderStructure() {
+    const target = this.panel('structure');
+    if (!target) return;
+    const results = target.querySelector('[data-struct-results]');
+    if (!results) return;
+    results.innerHTML = '';
+
+    const all = this._structColumns || [];
+    if (!all.length) { this.info(results, 'No columns.'); return; }
+
+    const defs = this.structDefs();
+    // Case-insensitive substring per column, matching the Data tab's filters.
+    let rows = all.filter(col => defs.every(d => {
+      const f = this._structColFilters[d.key];
+      if (!f) return true;
+      return String(d.text(col)).toLowerCase().includes(String(f).toLowerCase());
+    }));
+
+    if (this._structSortCol) {
+      const def = defs.find(d => d.key === this._structSortCol);
+      if (def) {
+        rows = rows.slice().sort((a, b) =>
+          this._structSortDir * String(def.text(a)).localeCompare(String(def.text(b)), undefined, { numeric: true, sensitivity: 'base' }));
+      }
+    }
+
+    if (!rows.length) { this.emptyStructure(results); return; }
 
     const wrap = document.createElement('div');
     wrap.className = 'overflow-x-auto';
@@ -887,11 +1005,17 @@ class TableDetails extends HTMLElement {
     table.className = 'table table-zebra table-sm';
 
     const thead = document.createElement('thead');
-    thead.innerHTML = '<tr><th>Column</th><th>Type</th><th>Nullable</th><th>Key</th></tr>';
+    const htr = document.createElement('tr');
+    defs.forEach(def => {
+      const th = document.createElement('th');
+      this.renderStructHeaderLabel(th, def);
+      htr.appendChild(th);
+    });
+    thead.appendChild(htr);
     table.appendChild(thead);
 
     const tbody = document.createElement('tbody');
-    columns.forEach(col => {
+    rows.forEach(col => {
       const tr = document.createElement('tr');
       const name = document.createElement('td');
       name.textContent = col.name;
@@ -927,7 +1051,118 @@ class TableDetails extends HTMLElement {
     });
     table.appendChild(tbody);
     wrap.appendChild(table);
+    results.appendChild(wrap);
+  }
+
+  // Empty-results state when active filters match nothing, offering a way to
+  // clear them (the headers that hold the filter icons aren't rendered).
+  emptyStructure(target) {
+    const active = Object.keys(this._structColFilters).filter(k => this._structColFilters[k]);
+    if (!active.length) { this.info(target, 'No columns.'); return; }
+    const wrap = document.createElement('div');
+    wrap.className = 'flex items-center gap-3';
+    const p = document.createElement('p');
+    p.className = 'text-base-content/60';
+    p.textContent = 'No columns match the active filter.';
+    const btn = document.createElement('button');
+    btn.className = 'btn btn-sm btn-ghost text-error';
+    btn.innerHTML = '<i data-lucide="filter-x" class="size-4"></i> Clear filters';
+    btn.addEventListener('click', () => {
+      this._structColFilters = {};
+      this.saveTableState();
+      this.renderStructure();
+    });
+    wrap.append(p, btn);
     target.appendChild(wrap);
+    if (window.lucide) window.lucide.createIcons({ root: wrap });
+  }
+
+  // Structure header in label mode: sortable name plus a filter toggle icon,
+  // tinted when a filter is active. Mirrors the Data tab's renderHeaderLabel.
+  renderStructHeaderLabel(th, def) {
+    const c = def.key;
+    th.innerHTML = '';
+    const box = document.createElement('div');
+    box.className = 'flex items-center justify-between gap-2';
+    const label = document.createElement('span');
+    label.className = 'inline-flex cursor-pointer select-none items-center gap-1';
+    label.title = 'Sort by ' + def.label;
+    const name = document.createElement('span');
+    name.textContent = def.label;
+    const arrow = document.createElement('span');
+    arrow.className = 'text-base-content/40 text-xs';
+    arrow.textContent = this._structSortCol === c ? (this._structSortDir === 1 ? '\u25b2' : '\u25bc') : '';
+    label.append(name, arrow);
+    label.addEventListener('click', () => {
+      if (this._structSortCol === c) this._structSortDir = -this._structSortDir;
+      else { this._structSortCol = c; this._structSortDir = 1; }
+      this.saveTableState();
+      this.renderStructure();
+    });
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'btn btn-ghost btn-xs btn-square';
+    const active = !!this._structColFilters[c];
+    btn.title = active ? ('Filter: ' + this._structColFilters[c]) : 'Filter this column';
+    btn.innerHTML = '<i data-lucide="filter" class="size-3' + (active ? ' text-primary' : '') + '"></i>';
+    btn.addEventListener('click', () => this.renderStructHeaderInput(th, def));
+    const right = document.createElement('div');
+    right.className = 'flex items-center gap-1';
+    right.appendChild(btn);
+    if (active) {
+      const clr = document.createElement('button');
+      clr.type = 'button';
+      clr.className = 'btn btn-ghost btn-xs btn-square';
+      clr.title = 'Clear filter';
+      clr.innerHTML = '<i data-lucide="filter-x" class="size-3 text-error"></i>';
+      clr.addEventListener('click', () => { delete this._structColFilters[c]; this.saveTableState(); this.renderStructure(); });
+      right.appendChild(clr);
+    }
+    box.append(label, right);
+    th.appendChild(box);
+    if (window.lucide) window.lucide.createIcons({ root: th });
+  }
+
+  // Structure header in input mode: type a filter value; Enter applies, X or
+  // Escape exits. Mirrors the Data tab's renderHeaderInput.
+  renderStructHeaderInput(th, def) {
+    const c = def.key;
+    th.innerHTML = '';
+    const box = document.createElement('div');
+    box.className = 'flex items-center gap-1';
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'input input-xs input-bordered w-14';
+    input.placeholder = 'Filter…';
+    input.value = this._structColFilters[c] || '';
+    const x = document.createElement('button');
+    x.type = 'button';
+    x.className = 'btn btn-ghost btn-xs btn-square';
+    x.title = 'Cancel filter';
+    x.innerHTML = '<i data-lucide="x" class="size-3.5"></i>';
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        const val = input.value.trim();
+        if (val) this._structColFilters[c] = val;
+        else delete this._structColFilters[c];
+        this.saveTableState();
+        this.renderStructure();
+      } else if (e.key === 'Escape') {
+        this.exitStructHeaderFilter(th, def);
+      }
+    });
+    x.addEventListener('click', () => this.exitStructHeaderFilter(th, def));
+    box.append(input, x);
+    th.appendChild(box);
+    if (window.lucide) window.lucide.createIcons({ root: th });
+    input.focus();
+  }
+
+  exitStructHeaderFilter(th, def) {
+    const c = def.key;
+    if (this._structColFilters[c]) { delete this._structColFilters[c]; this.saveTableState(); this.renderStructure(); }
+    else this.renderStructHeaderLabel(th, def);
   }
 
   // ---- Relations tab -----------------------------------------------------
