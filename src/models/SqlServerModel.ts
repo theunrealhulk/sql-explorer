@@ -5,6 +5,80 @@ function qid(name: string): string {
   return '[' + String(name).replace(/]/g, ']]') + ']';
 }
 
+// SQL Server type names that should be filtered with comparison operators
+// (=, >, <, >=, <=, !) rather than substring LIKE.
+const NUMERIC_TYPES = new Set([
+  'int', 'bigint', 'smallint', 'tinyint', 'decimal', 'numeric',
+  'float', 'real', 'money', 'smallmoney', 'bit',
+]);
+const DATE_TYPES = new Set([
+  'date', 'datetime', 'datetime2', 'smalldatetime', 'datetimeoffset', 'time',
+]);
+
+function isNumericType(type: string): boolean {
+  return NUMERIC_TYPES.has(String(type || '').toLowerCase());
+}
+function isDateType(type: string): boolean {
+  return DATE_TYPES.has(String(type || '').toLowerCase());
+}
+
+// Parses a leading comparison operator from a filter value. Recognises
+// <=, >=, !=, <>, !, =, <, >. When none is present the operator defaults to
+// '=' (equality). Returns the operator plus the remaining value text.
+function parseFilterOperator(raw: string): { op: string; value: string } {
+  const s = String(raw == null ? '' : raw).trim();
+  const m = s.match(/^\s*(<=|>=|!=|<>|=|<|>|!)\s*(.*)$/);
+  if (m) {
+    let op = m[1];
+    if (op === '!' || op === '!=') op = '<>';
+    return { op, value: m[2].trim() };
+  }
+  return { op: '=', value: s };
+}
+
+// Builds a SQL condition for a numeric/date column filter. Supports:
+//   [min,max]       -> BETWEEN min AND max (inclusive range)
+//   (v1,v2,v3)      -> IN (v1, v2, v3)
+//   <op>value       -> comparison (=, >, <, >=, <=, !) with '=' as default
+// `colExpr` is the comparable column expression; `makeParam` wraps a parameter
+// name into a comparable expression; `pushInput` registers a bound value.
+function buildTypedFilterClause(
+  colExpr: string,
+  raw: string,
+  paramBase: string,
+  makeParam: (name: string) => string,
+  pushInput: (name: string, value: string) => void
+): string | null {
+  const s = String(raw == null ? '' : raw).trim();
+  if (!s) return null;
+
+  const range = s.match(/^\[\s*([^,\]]*?)\s*,\s*([^,\]]*?)\s*\]$/);
+  if (range) {
+    const p1 = paramBase + 'a';
+    const p2 = paramBase + 'b';
+    pushInput(p1, range[1].trim());
+    pushInput(p2, range[2].trim());
+    return `${colExpr} BETWEEN ${makeParam(p1)} AND ${makeParam(p2)}`;
+  }
+
+  const list = s.match(/^\(\s*(.*?)\s*\)$/);
+  if (list) {
+    const items = list[1].split(',').map(x => x.trim()).filter(x => x !== '');
+    if (items.length) {
+      const parts = items.map((item, i) => {
+        const p = paramBase + 'i' + i;
+        pushInput(p, item);
+        return makeParam(p);
+      });
+      return `${colExpr} IN (${parts.join(', ')})`;
+    }
+  }
+
+  const { op, value } = parseFilterOperator(s);
+  pushInput(paramBase, value);
+  return `${colExpr} ${op} ${makeParam(paramBase)}`;
+}
+
 export interface TableInfo {
   name: string;
   fieldCount: number;
@@ -15,6 +89,7 @@ export interface TableInfo {
   referencesCount: number;
   referencesTables: string;
   schemaName?: string;
+  matchedColumns?: string;
 }
 
 export interface ColumnInfo {
@@ -211,7 +286,9 @@ export class SqlServerModel {
     dir: string,
     page: number,
     pageSize: number,
-    filter: string
+    filter: string,
+    columnFilters: Record<string, string> = {},
+    search = ''
   ): Promise<{ tables: TableInfo[]; total: number; page: number; pageSize: number }> {
     // Whitelist sort columns to avoid SQL injection
     const sortMap: Record<string, string> = {
@@ -226,14 +303,116 @@ export class SqlServerModel {
     const safePage = Math.max(1, Math.floor(page) || 1);
     const safeSize = Math.min(500, Math.max(1, Math.floor(pageSize) || 25));
     const offset = (safePage - 1) * safeSize;
-    const nameFilter = (filter || '').trim();
-    const whereClause = nameFilter ? 'WHERE o.name LIKE @namePattern' : '';
-    const pattern = '%' + nameFilter.replace(/[%_\[]/g, (m) => '[' + m + ']') + '%';
+
+    const escLike = (s: string): string => s.replace(/[%_[]/g, (m) => '[' + m + ']');
+
+    // Per-column filters. The name column is filtered in WHERE; the aggregate
+    // columns are filtered in HAVING (each converted to text for substring
+    // LIKE). Column keys are whitelisted so they can never be used for
+    // injection. A legacy single `filter` string maps onto the name column.
+    const cf: Record<string, string> = { ...(columnFilters || {}) };
+    const legacyName = (filter || '').trim();
+    if (legacyName && !cf.name) cf.name = legacyName;
+
+    const whereExpr: Record<string, string> = { name: 'o.name' };
+    const havingExpr: Record<string, string> = {
+      fieldCount: 'COUNT(DISTINCT c.column_id)',
+      rowCount: 'ISNULL(ps.[rowCount], 0)',
+      fkCount: 'COUNT(DISTINCT fk.object_id)',
+      referencedByCount:
+        `(SELECT COUNT(DISTINCT rfk.parent_object_id)
+           FROM [${database}].sys.foreign_keys rfk
+           WHERE rfk.referenced_object_id = o.object_id)`,
+    };
+
+    const inputs: { name: string; value: string | number }[] = [];
+    const whereConds: string[] = [];
+    const havingConds: string[] = [];
+    let idx = 0;
+    for (const [key, raw] of Object.entries(cf)) {
+      const val = String(raw == null ? '' : raw).trim();
+      if (!val) continue;
+      const param = 'cf' + idx++;
+      if (whereExpr[key]) {
+        // The name column keeps case-insensitive substring matching.
+        inputs.push({ name: param, value: '%' + escLike(val) + '%' });
+        whereConds.push(`${whereExpr[key]} LIKE @${param}`);
+      } else if (havingExpr[key]) {
+        // The aggregate columns are numeric — support comparison operators
+        // (=, >, <, >=, <=, !), ranges [min,max] and value lists (a,b,c), with
+        // '=' as the default when no operator is given.
+        const expr = havingExpr[key];
+        const toNum = (s: string): number | null => {
+          const n = Number(String(s).trim());
+          return String(s).trim() !== '' && !Number.isNaN(n) ? n : null;
+        };
+        const range = val.match(/^\[\s*([^,\]]*?)\s*,\s*([^,\]]*?)\s*\]$/);
+        const list = val.match(/^\(\s*(.*?)\s*\)$/);
+        if (range && toNum(range[1]) !== null && toNum(range[2]) !== null) {
+          const p1 = param + 'a';
+          const p2 = param + 'b';
+          inputs.push({ name: p1, value: toNum(range[1]) as number });
+          inputs.push({ name: p2, value: toNum(range[2]) as number });
+          havingConds.push(`${expr} BETWEEN @${p1} AND @${p2}`);
+        } else if (list) {
+          const nums = list[1].split(',').map(x => toNum(x)).filter(n => n !== null) as number[];
+          if (nums.length) {
+            const parts = nums.map((n, i) => {
+              const p = param + 'i' + i;
+              inputs.push({ name: p, value: n });
+              return '@' + p;
+            });
+            havingConds.push(`${expr} IN (${parts.join(', ')})`);
+          }
+        } else {
+          const { op, value } = parseFilterOperator(val);
+          const num = toNum(value);
+          if (num !== null) {
+            inputs.push({ name: param, value: num });
+            havingConds.push(`${expr} ${op} @${param}`);
+          } else {
+            inputs.push({ name: param, value: '%' + escLike(val) + '%' });
+            havingConds.push(`CONVERT(NVARCHAR(64), ${expr}) LIKE @${param}`);
+          }
+        }
+      }
+    }
+    // "Find tables by column name" search. Keeps only tables that have at
+    // least one column whose name contains the typed term (case-insensitive).
+    const searchTerm = (search || '').trim();
+    if (searchTerm) {
+      const sp = 'search';
+      inputs.push({ name: sp, value: '%' + escLike(searchTerm) + '%' });
+      whereConds.push(
+        `EXISTS (SELECT 1 FROM [${database}].sys.columns sc
+                   WHERE sc.object_id = o.object_id AND sc.name LIKE @${sp})`
+      );
+    }
+
+    const whereClause = whereConds.length ? 'WHERE ' + whereConds.join(' AND ') : '';
+    const havingClause = havingConds.length ? 'HAVING ' + havingConds.join(' AND ') : '';
+
+    // When a column-name search is active, also surface the matching column
+    // names per table so the UI can show a "Matches" column.
+    const matchedColumnsSelect = searchTerm
+      ? `,
+                (SELECT STRING_AGG(mc.name, ', ')
+                   FROM (
+                     SELECT DISTINCT sc.name
+                     FROM [${database}].sys.columns sc
+                     WHERE sc.object_id = o.object_id AND sc.name LIKE @search
+                   ) mc) AS matchedColumns`
+      : '';
+
+    const bindInputs = (req: import('mssql').Request): import('mssql').Request => {
+      inputs.forEach((i) => req.input(i.name, i.value));
+      return req;
+    };
 
     const pool = await getPool(connectionString);
     try {
       const tables = (
-        await pool.request().input('namePattern', pattern).query<TableInfo>(`
+        await bindInputs(pool.request()).query<TableInfo>(`
         SELECT o.name AS name,
                 s.name AS schemaName,
                 COUNT(DISTINCT c.column_id)  AS fieldCount,
@@ -258,7 +437,7 @@ export class SqlServerModel {
                      FROM [${database}].sys.foreign_keys ofk2
                      JOIN [${database}].sys.tables ptt ON ptt.object_id = ofk2.referenced_object_id
                      WHERE ofk2.parent_object_id = o.object_id
-                   ) rt2) AS referencesTables
+                   ) rt2) AS referencesTables${matchedColumnsSelect}
         FROM [${database}].sys.tables o
         JOIN [${database}].sys.schemas s
                 ON s.schema_id = o.schema_id
@@ -274,17 +453,33 @@ export class SqlServerModel {
         ) ps ON ps.object_id = o.object_id
         ${whereClause}
         GROUP BY o.object_id, o.name, s.name, ps.[rowCount]
+        ${havingClause}
         ORDER BY ${orderCol} ${orderDir}
         OFFSET ${offset} ROWS FETCH NEXT ${safeSize} ROWS ONLY`)
       ).recordset;
 
       const total = (
-        await pool
-          .request()
-          .input('namePattern', pattern)
-          .query<{ n: number }>(
-            `SELECT COUNT(*) AS n FROM [${database}].sys.tables o ${whereClause}`
-          )
+        await bindInputs(pool.request()).query<{ n: number }>(
+          `SELECT COUNT(*) AS n FROM (
+             SELECT o.object_id
+             FROM [${database}].sys.tables o
+             JOIN [${database}].sys.schemas s
+                     ON s.schema_id = o.schema_id
+             LEFT JOIN [${database}].sys.columns c
+                     ON c.object_id = o.object_id
+             LEFT JOIN [${database}].sys.foreign_keys fk
+                     ON fk.parent_object_id = o.object_id
+             LEFT JOIN (
+                     SELECT object_id, SUM(row_count) AS [rowCount]
+                     FROM [${database}].sys.dm_db_partition_stats
+                     WHERE index_id IN (0, 1)
+                     GROUP BY object_id
+             ) ps ON ps.object_id = o.object_id
+             ${whereClause}
+             GROUP BY o.object_id, o.name, s.name, ps.[rowCount]
+             ${havingClause}
+           ) x`
+        )
       ).recordset[0].n;
 
       return { tables, total, page: safePage, pageSize: safeSize };
@@ -588,15 +783,17 @@ export class SqlServerModel {
         .filter(([, v]) => v != null && String(v).trim() !== '');
 
       let realCols: string[] = [];
+      const colTypes = new Map<string, string>();
       if (term || filterEntries.length || (sortColumn || '').trim()) {
         const colsRes = await pool
           .request()
           .input('schema', schema)
           .input('table', table)
-          .query<{ COLUMN_NAME: string }>(
-            `SELECT COLUMN_NAME FROM ${qid(database)}.INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = @schema AND TABLE_NAME = @table`
+          .query<{ COLUMN_NAME: string; DATA_TYPE: string }>(
+            `SELECT COLUMN_NAME, DATA_TYPE FROM ${qid(database)}.INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = @schema AND TABLE_NAME = @table`
           );
         realCols = colsRes.recordset.map(r => r.COLUMN_NAME);
+        colsRes.recordset.forEach(r => colTypes.set(r.COLUMN_NAME.toLowerCase(), r.DATA_TYPE));
       }
 
       const escLike = (s: string): string => s.replace(/[%_[]/g, m => '[' + m + ']');
@@ -620,10 +817,28 @@ export class SqlServerModel {
         // Only accept filters for columns that actually exist in the table.
         if (!lowerReal.has(String(col).toLowerCase())) return;
         const param = 'cf' + i;
-        inputs.push({ name: param, value: '%' + escLike(String(val).trim()) + '%' });
-        clauses.push(
-          `TRY_CONVERT(NVARCHAR(MAX), ${qid(col)}) COLLATE Latin1_General_CI_AS LIKE @${param}`
-        );
+        const type = colTypes.get(String(col).toLowerCase()) || '';
+        const raw = String(val).trim();
+        // Numeric/date columns support comparison operators (=, >, <, >=, <=, !),
+        // ranges [min,max] and value lists (a,b,c); everything else keeps the
+        // case-insensitive substring LIKE behaviour.
+        if (isNumericType(type) || isDateType(type)) {
+          const convType = isDateType(type) ? 'DATETIME2' : 'FLOAT';
+          const converted = `TRY_CONVERT(${convType}, ${qid(col)})`;
+          const clause = buildTypedFilterClause(
+            converted,
+            raw,
+            param,
+            name => `TRY_CONVERT(${convType}, @${name})`,
+            (name, value) => inputs.push({ name, value })
+          );
+          if (clause) clauses.push(clause);
+        } else {
+          inputs.push({ name: param, value: '%' + escLike(raw) + '%' });
+          clauses.push(
+            `TRY_CONVERT(NVARCHAR(MAX), ${qid(col)}) COLLATE Latin1_General_CI_AS LIKE @${param}`
+          );
+        }
       });
 
       const whereClause = clauses.length ? 'WHERE ' + clauses.join(' AND ') : '';

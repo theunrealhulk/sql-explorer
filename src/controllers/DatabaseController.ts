@@ -31,7 +31,7 @@ export class DatabaseController {
   }
 
   static async tables(req: Request, res: Response): Promise<void> {
-    const { connectionString, database, sort, dir, page, pageSize, filter } = req.body;
+    const { connectionString, database, sort, dir, page, pageSize, filter, columnFilters, search } = req.body;
     try {
       const result = await SqlServerModel.listTables(
         connectionString,
@@ -40,7 +40,9 @@ export class DatabaseController {
         dir || 'ASC',
         page || 1,
         pageSize || 25,
-        filter || ''
+        filter || '',
+        columnFilters || {},
+        search || ''
       );
       res.json({ ok: true, ...result });
     } catch (err) {

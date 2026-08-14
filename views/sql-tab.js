@@ -62,6 +62,23 @@ window.SqlScratchTab = {
     incFont.title = 'Increase font size';
     incFont.innerHTML = '<i data-lucide="zoom-in" class="size-4"></i>';
     fontGroup.append(decFont, incFont);
+    // View toggle: render the results as a table (default) or as a JSON tree.
+    // Selecting JSON also switches the editor/results split from horizontal
+    // (stacked) to vertical (side-by-side).
+    const viewGroup = document.createElement('div');
+    viewGroup.className = 'join';
+    const tableViewBtn = document.createElement('button');
+    tableViewBtn.type = 'button';
+    tableViewBtn.className = 'btn btn-sm btn-square btn-ghost join-item';
+    tableViewBtn.title = 'Table view';
+    tableViewBtn.innerHTML = '<i data-lucide="table" class="size-4"></i>';
+    const jsonViewBtn = document.createElement('button');
+    jsonViewBtn.type = 'button';
+    jsonViewBtn.className = 'btn btn-sm btn-square btn-ghost join-item';
+    jsonViewBtn.title = 'JSON view';
+    jsonViewBtn.innerHTML = '<i data-lucide="braces" class="size-4"></i>';
+    viewGroup.append(tableViewBtn, jsonViewBtn);
+    fontGroup.append(viewGroup);
     // Right-aligned group: copy / export / load the editor contents.
     const copyBtn = document.createElement('button');
     copyBtn.type = 'button';
@@ -92,7 +109,8 @@ window.SqlScratchTab = {
     wrap.className = 'relative overflow-hidden rounded-lg border border-base-300 bg-base-200 min-h-0';
     wrap.style.flex = '0 0 40%';
 
-    // Draggable splitter to adjust the editor/results heights.
+    // Draggable splitter to adjust the editor/results sizes. Orientation flips
+    // between horizontal (stacked) and vertical (side-by-side) with the view.
     const splitter = document.createElement('div');
     splitter.className = 'dashed-sep-h shrink-0 h-1.5 cursor-row-resize transition-colors';
     splitter.setAttribute('role', 'separator');
@@ -103,7 +121,32 @@ window.SqlScratchTab = {
     results.className = 'overflow-auto min-h-0';
     results.style.flex = '1 1 0';
 
-    root.append(bar, wrap, splitter, results);
+    // Split container: holds the editor, splitter and results. Its flex
+    // direction is toggled to switch between stacked and side-by-side layouts.
+    const split = document.createElement('div');
+    split.className = 'flex flex-col gap-0 min-h-0';
+    split.style.flex = '1 1 0';
+    split.append(wrap, splitter, results);
+
+    root.append(bar, split);
+
+    // Whether the results/editor are arranged vertically (side-by-side).
+    let vertical = false;
+    const applyOrientation = () => {
+      if (vertical) {
+        split.classList.remove('flex-col');
+        split.classList.add('flex-row');
+        splitter.className = 'dashed-sep-v shrink-0 w-1.5 cursor-col-resize transition-colors';
+        splitter.setAttribute('aria-orientation', 'vertical');
+        wrap.style.flex = '0 0 50%';
+      } else {
+        split.classList.remove('flex-row');
+        split.classList.add('flex-col');
+        splitter.className = 'dashed-sep-h shrink-0 h-1.5 cursor-row-resize transition-colors';
+        splitter.setAttribute('aria-orientation', 'horizontal');
+        wrap.style.flex = '0 0 40%';
+      }
+    };
 
     // Splitter drag: resize the editor pane between 15% and 85% of the area
     // available below the toolbar.
@@ -116,12 +159,19 @@ window.SqlScratchTab = {
     };
     const onMove = (e) => {
       if (!dragging) return;
-      const area = root.getBoundingClientRect();
-      const top = wrap.getBoundingClientRect().top;
-      const avail = area.bottom - top;
-      let h = e.clientY - top;
-      h = Math.max(avail * 0.15, Math.min(avail * 0.85, h));
-      wrap.style.flex = '0 0 ' + h + 'px';
+      const rect = split.getBoundingClientRect();
+      if (vertical) {
+        const avail = rect.right - rect.left;
+        let w = e.clientX - rect.left;
+        w = Math.max(avail * 0.15, Math.min(avail * 0.85, w));
+        wrap.style.flex = '0 0 ' + w + 'px';
+      } else {
+        const top = wrap.getBoundingClientRect().top;
+        const avail = rect.bottom - top;
+        let h = e.clientY - top;
+        h = Math.max(avail * 0.15, Math.min(avail * 0.85, h));
+        wrap.style.flex = '0 0 ' + h + 'px';
+      }
     };
     const onUp = () => {
       if (!dragging) return;
@@ -291,6 +341,54 @@ window.SqlScratchTab = {
     wrap.appendChild(overlay);
 
     const ctx = { results, sections: [], current: 0, refreshBtn, trashBtn, selectedRow: null, opts, view, editMeta: null };
+    // Result view mode: 'table' (default) or 'json'. Persisted across mounts.
+    ctx.viewMode = localStorage.getItem('sql-result-view') === 'json' ? 'json' : 'table';
+    ctx.lastResult = null;
+    // Per-result-set filter/sort state (rebuilt on each render, persisted so it
+    // survives refreshes/remounts alongside the cached result).
+    ctx._setStates = [];
+    const resultKey = storageKey + ':result';
+    // Persist the last result (data + SQL) and the current filter/sort state so
+    // the grid can be restored after a refresh without re-running the query.
+    ctx.persistResult = () => {
+      if (window.saveEnabled && !window.saveEnabled(saveId)) return;
+      try {
+        if (!ctx.lastResult) { localStorage.removeItem(resultKey); return; }
+        const filters = ctx._setStates.map(s => (s ? {
+          colFilters: s.colFilters,
+          sortCol: s.sortState.col,
+          sortDir: s.sortState.dir,
+        } : null));
+        localStorage.setItem(resultKey, JSON.stringify({
+          d: ctx.lastResult.d,
+          sql: ctx.lastResult.sql,
+          filters,
+        }));
+      } catch (e) { /* ignore quota/serialization errors */ }
+    };
+    // Reflect the active view mode on the toolbar toggle buttons.
+    const updateViewButtons = () => {
+      tableViewBtn.classList.toggle('btn-active', ctx.viewMode === 'table');
+      jsonViewBtn.classList.toggle('btn-active', ctx.viewMode === 'json');
+    };
+    // Switch result view mode: JSON uses a side-by-side (vertical) split, table
+    // uses the stacked (horizontal) layout. Re-renders the last result set.
+    const setViewMode = (mode) => {
+      if (mode === ctx.viewMode) return;
+      ctx.viewMode = mode;
+      try { localStorage.setItem('sql-result-view', mode); } catch (e) { /* ignore */ }
+      vertical = mode === 'json';
+      applyOrientation();
+      updateViewButtons();
+      if (view.requestMeasure) view.requestMeasure();
+      if (ctx.lastResult) this._showResults(ctx, ctx.lastResult.d, ctx.lastResult.sql);
+    };
+    tableViewBtn.addEventListener('click', () => setViewMode('table'));
+    jsonViewBtn.addEventListener('click', () => setViewMode('json'));
+    // Apply the persisted view mode on first mount.
+    vertical = ctx.viewMode === 'json';
+    applyOrientation();
+    updateViewButtons();
     // Persists the editor contents for this context's storage key.
     ctx.persist = () => {
       if (window.saveEnabled && !window.saveEnabled(saveId)) return;
@@ -356,12 +454,27 @@ window.SqlScratchTab = {
       if (d && d.ok && d.schema) window.SqlEditor.setSchema(view, d.schema);
     } catch { /* completions are best-effort */ }
 
+    // Restore the last result (and its filters/sort) from a previous session so
+    // it survives a refresh without needing to re-run the query.
+    try {
+      const cached = localStorage.getItem(resultKey);
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        if (parsed && parsed.d) {
+          ctx._restoreFilters = parsed.filters || null;
+          this._showResults(ctx, parsed.d, parsed.sql || '');
+          ctx._restoreFilters = null;
+        }
+      }
+    } catch (e) { /* ignore corrupt cache */ }
+
     return {
       destroy() {
         window.removeEventListener('resize', sizeHost);
         window.removeEventListener('pointermove', onMove);
         window.removeEventListener('pointerup', onUp);
         observer.disconnect();
+        if (ctx.jsonEditors) { ctx.jsonEditors.forEach(e => { try { e.destroy(); } catch (x) { /* ignore */ } }); ctx.jsonEditors = []; }
         view.destroy();
       },
     };
@@ -377,7 +490,9 @@ window.SqlScratchTab = {
     buttons.forEach(b => (b.disabled = true));
     ctx.sections = [];
     if (ctx.updateOverlay) ctx.updateOverlay();
-    results.innerHTML = '<p class="text-base-content/60">Running…</p>';
+    results.innerHTML = '<div class="flex items-center gap-3 text-base-content/60 p-2">' +
+      '<span class="loading loading-spinner loading-md"></span>' +
+      '<span>Running query…</span></div>';
     try {
       const res = await fetch('/api/query', {
         method: 'POST',
@@ -478,6 +593,23 @@ window.SqlScratchTab = {
         this._copyResults(set).then(() => feedback(copyRes, 'Copied')).catch(() => {});
       });
       actions.appendChild(copyRes);
+
+      const copyJson = document.createElement('button');
+      copyJson.type = 'button';
+      copyJson.className = 'btn btn-xs btn-square';
+      copyJson.innerHTML = '<i data-lucide="braces" class="size-4"></i>';
+      copyJson.title = 'Copy results as JSON';
+      copyJson.addEventListener('click', () => {
+        const data = set.rows.map(row => {
+          const o = {};
+          set.columns.forEach(c => { o[c] = row[c] === undefined ? null : row[c]; });
+          return o;
+        });
+        navigator.clipboard.writeText(JSON.stringify(data, null, 2))
+          .then(() => feedback(copyJson, 'Copied'))
+          .catch(() => { /* clipboard may be unavailable */ });
+      });
+      actions.appendChild(copyJson);
     }
 
     wrap.append(pre, actions);
@@ -528,9 +660,15 @@ window.SqlScratchTab = {
 
   _showResults(ctx, d, sql) {
     const results = ctx.results;
+    // Tear down any JSON editors from a previous render to free resources.
+    if (ctx.jsonEditors) { ctx.jsonEditors.forEach(e => { try { e.destroy(); } catch (x) { /* ignore */ } }); ctx.jsonEditors = []; }
     results.innerHTML = '';
     ctx.sections = [];
     if (ctx.selectRow) ctx.selectRow(null);
+    // Remember the last result so we can re-render when the view mode changes.
+    ctx.lastResult = { d, sql };
+    // Reset per-result-set filter/sort state for this render.
+    ctx._setStates = [];
 
     const sets = (d.resultSets || []).filter(s => s.columns && s.columns.length);
     const statements = this._splitStatements(sql);
@@ -544,6 +682,7 @@ window.SqlScratchTab = {
       info.textContent = 'Query executed. ' + affected + ' row(s) affected.';
       results.appendChild(info);
       if (ctx.updateOverlay) ctx.updateOverlay();
+      if (ctx.persistResult) ctx.persistResult();
       return;
     }
 
@@ -567,6 +706,39 @@ window.SqlScratchTab = {
       meta.textContent = label + set.rows.length + ' row(s)' + (set.truncated ? ' (showing first 1000)' : '');
       section.appendChild(meta);
 
+      // JSON view: render the result set as a read-only JSON tree instead of a
+      // table. Used when the user selects the JSON toggle (side-by-side split).
+      if (ctx.viewMode === 'json') {
+        const jsonBox = document.createElement('div');
+        jsonBox.className = 'sql-json-view rounded-lg border border-base-300';
+        const data = set.rows.map(row => {
+          const o = {};
+          set.columns.forEach(c => { o[c] = row[c] === undefined ? null : row[c]; });
+          return o;
+        });
+        if (typeof JSONEditor === 'undefined') {
+          const pre = document.createElement('pre');
+          pre.className = 'p-2 text-sm overflow-auto m-0';
+          pre.textContent = JSON.stringify(data, null, 2);
+          jsonBox.appendChild(pre);
+        } else {
+          const editor = new JSONEditor(jsonBox, {
+            mode: 'view',
+            mainMenuBar: true,
+            navigationBar: false,
+            search: true,
+          });
+          editor.set(data);
+          if (typeof editor.expandAll === 'function') { try { editor.expandAll(); } catch (e) { /* ignore */ } }
+          ctx.jsonEditors = ctx.jsonEditors || [];
+          ctx.jsonEditors.push(editor);
+        }
+        section.appendChild(jsonBox);
+        results.appendChild(section);
+        ctx.sections.push(section);
+        return;
+      }
+
       const box = document.createElement('div');
       box.className = 'rounded-lg border border-base-300';
       const table = document.createElement('table');
@@ -575,9 +747,13 @@ window.SqlScratchTab = {
       const thead = document.createElement('thead');
       thead.className = 'sticky top-0 z-10 bg-base-200';
       const htr = document.createElement('tr');
-      const sortState = { col: null, dir: 1 };
-      const colFilters = {};
+      // Restore previously saved sort/filter state for this result set (if any).
+      const savedState = ctx._restoreFilters && ctx._restoreFilters[i];
+      const sortState = { col: (savedState && savedState.sortCol) || null, dir: (savedState && savedState.sortDir) || 1 };
+      const colFilters = (savedState && savedState.colFilters) ? { ...savedState.colFilters } : {};
       const ths = {};
+      // Register this set's state so it can be persisted after edits.
+      ctx._setStates[i] = { colFilters, sortState };
 
       // Client-side per-column filtering of the result set. Each active filter
       // is a case-insensitive substring match; multiple columns are ANDed.
@@ -715,6 +891,9 @@ window.SqlScratchTab = {
       const renderRows = () => {
         if (ctx.selectRow) ctx.selectRow(null);
         tbody.innerHTML = '';
+        box.classList.toggle('filter-active-border',
+          Object.values(colFilters).some(v => v !== '' && v !== undefined));
+        if (ctx.persistResult) ctx.persistResult();
         let rows = filterRows(set.rows);
         if (sortState.col) rows = rows.slice().sort(compare);
         rows.forEach(row => {
@@ -744,6 +923,7 @@ window.SqlScratchTab = {
     });
 
     if (ctx.updateOverlay) ctx.updateOverlay();
+    if (ctx.persistResult) ctx.persistResult();
   },
 
   // Maps a SQL Server type name to the best-fit HTML input type.

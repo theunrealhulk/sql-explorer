@@ -10,6 +10,9 @@ app.use(express.json());
 const viewsDir = path.join(__dirname, '..', 'views');
 app.use(express.static(viewsDir));
 
+// Database engine logo assets (svg files under assets/).
+app.use('/assets', express.static(path.join(__dirname, '..', 'assets')));
+
 // Third-party browser assets (Lucide icons UMD bundle)
 app.use(
   '/vendor/lucide',

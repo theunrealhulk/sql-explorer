@@ -47,7 +47,7 @@ class DbDetails extends HTMLElement {
     this.pageSize = 20;
     this.sortKey = 'name';
     this.sortDir = 'ASC';
-    this.filter = '';
+    this._colFilters = {};
     this._filterTimer = null;
     this._uid = 'db-' + Math.random().toString(36).slice(2);
     this._relLoaded = false;
@@ -102,11 +102,13 @@ class DbDetails extends HTMLElement {
       const raw = localStorage.getItem(this.tablesStateKey());
       if (!raw) return;
       const s = JSON.parse(raw);
-      if (typeof s.filter === 'string') this.filter = s.filter;
+      if (s.colFilters && typeof s.colFilters === 'object') this._colFilters = s.colFilters;
       if (typeof s.sortKey === 'string') this.sortKey = s.sortKey;
       if (s.sortDir === 'ASC' || s.sortDir === 'DESC') this.sortDir = s.sortDir;
       if (Number.isInteger(s.page) && s.page > 0) this.page = s.page;
       if ([20, 50, 100, 200, 500].includes(s.pageSize)) this.pageSize = s.pageSize;
+      if (typeof s.lastFilterKey === 'string') this._lastFilterKey = s.lastFilterKey;
+      if (typeof s.search === 'string') this._search = s.search;
     } catch (_) { /* ignore corrupt state */ }
   }
 
@@ -114,11 +116,13 @@ class DbDetails extends HTMLElement {
     if (window.saveEnabled && !window.saveEnabled('dbTables')) return;
     try {
       localStorage.setItem(this.tablesStateKey(), JSON.stringify({
-        filter: this.filter,
+        colFilters: this._colFilters,
         sortKey: this.sortKey,
         sortDir: this.sortDir,
         page: this.page,
         pageSize: this.pageSize,
+        lastFilterKey: this._lastFilterKey || '',
+        search: this._search || '',
       }));
     } catch (_) { /* ignore quota/serialisation errors */ }
   }
@@ -148,6 +152,27 @@ class DbDetails extends HTMLElement {
       });
     });
     if (active === 'SQL') this.loadSqlTab();
+    if (window.updateCrumbActions) window.updateCrumbActions();
+  }
+
+  // Exposes a small controller so an external UI (the breadcrumb action
+  // buttons) can drive tab switching.
+  get tabController() {
+    const self = this;
+    const tabs = ['Tables', 'Relations', 'SQL'];
+    return {
+      tabs: () => tabs,
+      activeTab: () => {
+        const checked = self.querySelector('input[role="tab"]:checked');
+        return checked ? checked.getAttribute('aria-label') : tabs[0];
+      },
+      select: (label) => {
+        const input = self.querySelector('input[role="tab"][aria-label="' + label + '"]');
+        if (!input) return;
+        input.checked = true;
+        input.dispatchEvent(new Event('change'));
+      },
+    };
   }
 
   // Mounts the shared editable SQL editor into the SQL tab, once.
@@ -181,32 +206,58 @@ class DbDetails extends HTMLElement {
     target.appendChild(div);
   }
 
-  // Builds the persistent filter input + results container once, so typing in
-  // the filter does not lose focus when the table re-renders.
+  // Empty-results state for the Tables tab. If column filters are active, shows
+  // a "Clear filters" button so a filter matching nothing can still be reset
+  // (the table headers, which hold the clear icons, aren't rendered).
+  emptyTables(target) {
+    target.innerHTML = '';
+    const active = Object.keys(this._colFilters).filter(k => this._colFilters[k]);
+    if (!active.length) { this.info(target, 'No tables.'); return; }
+    const wrap = document.createElement('div');
+    wrap.className = 'flex items-center gap-3';
+    const p = document.createElement('p');
+    p.className = 'text-base-content/60';
+    p.textContent = 'No tables match the active filter.';
+    const btn = document.createElement('button');
+    btn.className = 'btn btn-sm btn-ghost text-error';
+    btn.innerHTML = '<i data-lucide="filter-x" class="size-4"></i> Clear filters';
+    btn.addEventListener('click', () => {
+      this._colFilters = {};
+      this.page = 1;
+      this.loadTables();
+    });
+    wrap.appendChild(p);
+    wrap.appendChild(btn);
+    target.appendChild(wrap);
+    if (window.lucide) window.lucide.createIcons({ root: wrap });
+  }
+
+  // Builds the results container once. Per-column filtering lives in the table
+  // headers (see renderTables), mirroring the Data tab.
   buildTablesPanel() {
     const panel = this.panel('tables');
     if (!panel) return;
     panel.innerHTML = '';
 
+    // Persistent "find in all columns" search bar, mirroring the table Data tab.
     const bar = document.createElement('div');
-    bar.className = 'mb-3';
-    const label = document.createElement('label');
-    label.className = 'input input-sm input-bordered flex items-center gap-2 max-w-xs';
+    bar.className = 'mb-3 flex flex-wrap items-center gap-3';
+
     const input = document.createElement('input');
-    input.type = 'text';
-    input.className = 'grow';
-    input.placeholder = 'Filter by table name…';
-    input.value = this.filter;
+    input.type = 'search';
+    input.className = 'input input-bordered input-lg grow';
+    input.placeholder = 'Find tables containing a column named…';
+    input.value = this._search || '';
     input.addEventListener('input', () => {
-      clearTimeout(this._filterTimer);
-      this._filterTimer = setTimeout(() => {
-        this.filter = input.value;
+      clearTimeout(this._searchTimer);
+      this._searchTimer = setTimeout(() => {
+        this._search = input.value.trim();
         this.page = 1;
         this.loadTables();
       }, 300);
     });
-    label.appendChild(input);
-    bar.appendChild(label);
+
+    bar.appendChild(input);
     panel.appendChild(bar);
 
     const results = document.createElement('div');
@@ -223,7 +274,9 @@ class DbDetails extends HTMLElement {
     const target = this.results();
     if (!target) return;
     this.saveTablesState();
-    this.info(target, 'Loading tables…');
+    // Skip the "Loading…" clear while live-filtering the name column so the
+    // focused input isn't torn out of the DOM mid-keystroke.
+    if (!this._reopenFilter) this.info(target, 'Loading tables…');
     const d = await this.api('tables', {
       connectionString: this.cs,
       database: this.database,
@@ -231,7 +284,8 @@ class DbDetails extends HTMLElement {
       dir: this.sortDir,
       page: this.page,
       pageSize: this.pageSize,
-      filter: this.filter,
+      columnFilters: this._colFilters,
+      search: this._search,
     });
     if (!d.ok) { this.error(target, d.error); return; }
     this.renderTables(target, d);
@@ -247,36 +301,42 @@ class DbDetails extends HTMLElement {
       { key: 'fkCount', label: 'Uses referencing tables' },
       { key: 'referencedByCount', label: 'Used by other tables' },
     ];
+    this._columns = columns;
+
+    if (!(d.tables || []).length) {
+      this.emptyTables(target);
+      return;
+    }
 
     const totalPages = Math.max(1, Math.ceil(d.total / d.pageSize));
 
     const wrap = document.createElement('div');
     wrap.className = 'overflow-x-auto';
+    if (Object.values(this._colFilters).some(v => v)) wrap.classList.add('filter-active-border');
     const table = document.createElement('table');
     table.className = 'table table-zebra table-sm';
 
     const thead = document.createElement('thead');
     const htr = document.createElement('tr');
+    // If the last applied filter (before a reload/remount) was on the table
+    // name, re-open its filter input focused so the user can keep typing.
+    if (!this._reopenFilter && this._lastFilterKey === 'name' && !this._focusedNameOnce) {
+      this._focusedNameOnce = true;
+      const v = this._colFilters.name || '';
+      this._reopenFilter = { key: 'name', value: v, caret: v.length };
+    }
     columns.forEach(col => {
       const th = document.createElement('th');
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = 'flex items-center gap-1 font-bold hover:text-primary cursor-pointer';
-      btn.textContent = col.label;
-      if (this.sortKey === col.key) {
-        const arrow = document.createElement('span');
-        arrow.textContent = this.sortDir === 'ASC' ? '\u25B2' : '\u25BC';
-        arrow.className = 'text-xs';
-        btn.appendChild(arrow);
-      }
-      btn.addEventListener('click', () => {
-        if (this.sortKey === col.key) this.sortDir = this.sortDir === 'ASC' ? 'DESC' : 'ASC';
-        else { this.sortKey = col.key; this.sortDir = 'ASC'; }
-        this.page = 1;
-        this.loadTables();
-      });
-      th.appendChild(btn);
+      this.renderHeaderLabel(th, col);
       htr.appendChild(th);
+      // When searching by column name, show a "Matches" column right after the
+      // table name listing the columns that matched the typed value.
+      if (col.key === 'name' && this._search) {
+        const mth = document.createElement('th');
+        mth.className = 'text-info border-2 border-warning';
+        mth.textContent = 'Matched columns';
+        htr.appendChild(mth);
+      }
     });
     thead.appendChild(htr);
     table.appendChild(thead);
@@ -316,6 +376,12 @@ class DbDetails extends HTMLElement {
       usedBy.appendChild(yesNo((t.referencedByCount || 0) > 0));
 
       tr.appendChild(name);
+      if (this._search) {
+        const matchTd = document.createElement('td');
+        matchTd.className = 'text-info font-bold border-2 border-warning';
+        matchTd.textContent = t.matchedColumns || '';
+        tr.appendChild(matchTd);
+      }
       tr.appendChild(fields);
       tr.appendChild(rowsTd);
       tr.appendChild(uses);
@@ -327,6 +393,155 @@ class DbDetails extends HTMLElement {
     target.appendChild(wrap);
 
     target.appendChild(this.pagination(d, totalPages));
+
+    // Now that the grid is attached to the document, focus the filter input we
+    // re-opened (focusing a detached element above is a no-op).
+    if (this._pendingFocusInput) {
+      const input = this._pendingFocusInput;
+      const pos = this._pendingFocusCaret;
+      this._pendingFocusInput = null;
+      requestAnimationFrame(() => {
+        if (!input.isConnected) return;
+        input.focus();
+        try { input.setSelectionRange(pos, pos); } catch (e) { /* ignore */ }
+      });
+    }
+  }
+
+  // Column header in label mode: sortable column name plus a filter toggle
+  // icon (tinted when active) and a clear icon. Mirrors the Data tab.
+  renderHeaderLabel(th, col) {
+    const c = col.key;
+    // If this column was being live-filtered as the user typed, re-open its
+    // input (restoring the value and caret) instead of showing the label.
+    if (this._reopenFilter && this._reopenFilter.key === c) {
+      const state = this._reopenFilter;
+      this._reopenFilter = null;
+      this.renderHeaderInput(th, col);
+      const input = th.querySelector('input');
+      if (input) {
+        input.value = state.value;
+        const pos = state.caret == null ? state.value.length : state.caret;
+        try { input.setSelectionRange(pos, pos); } catch (e) { /* ignore */ }
+        input.focus();
+        // The header may still be detached from the document at this point
+        // (the table is built in memory and appended later), so calling focus()
+        // now can be a no-op. Re-focus on the next frame once it's attached.
+        this._pendingFocusInput = input;
+        this._pendingFocusCaret = pos;
+      }
+      return;
+    }
+    th.innerHTML = '';
+    const box = document.createElement('div');
+    box.className = 'flex items-center justify-between gap-2';
+    const label = document.createElement('span');
+    label.className = 'inline-flex cursor-pointer select-none items-center gap-1 font-bold hover:text-primary';
+    label.title = 'Sort by ' + col.label;
+    const name = document.createElement('span');
+    name.textContent = col.label;
+    const arrow = document.createElement('span');
+    arrow.className = 'text-base-content/40 text-xs';
+    arrow.textContent = this.sortKey === c ? (this.sortDir === 'ASC' ? '\u25B2' : '\u25BC') : '';
+    label.append(name, arrow);
+    label.addEventListener('click', () => {
+      if (this.sortKey === c) this.sortDir = this.sortDir === 'ASC' ? 'DESC' : 'ASC';
+      else { this.sortKey = c; this.sortDir = 'ASC'; }
+      this.page = 1;
+      this.loadTables();
+    });
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'btn btn-ghost btn-xs btn-square';
+    const active = !!this._colFilters[c];
+    btn.title = active ? ('Filter: ' + this._colFilters[c]) : 'Filter this column';
+    btn.innerHTML = '<i data-lucide="filter" class="size-3' + (active ? ' text-primary' : '') + '"></i>';
+    btn.addEventListener('click', () => this.renderHeaderInput(th, col));
+    const right = document.createElement('div');
+    right.className = 'flex items-center gap-1';
+    right.appendChild(btn);
+    if (active) {
+      const clr = document.createElement('button');
+      clr.type = 'button';
+      clr.className = 'btn btn-ghost btn-xs btn-square';
+      clr.title = 'Clear filter';
+      clr.innerHTML = '<i data-lucide="filter-x" class="size-3 text-error"></i>';
+      clr.addEventListener('click', () => { delete this._colFilters[c]; this.page = 1; this.loadTables(); });
+      right.appendChild(clr);
+    }
+    box.append(label, right);
+    th.appendChild(box);
+    if (window.lucide) window.lucide.createIcons({ root: th });
+  }
+
+  // Column header in input mode: a text field to type a filter value plus an X
+  // to cancel. Enter applies the filter; X (or Escape) exits. Mirrors the Data tab.
+  renderHeaderInput(th, col) {
+    const c = col.key;
+    th.innerHTML = '';
+    const box = document.createElement('div');
+    box.className = 'flex items-center gap-1';
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'input input-xs input-bordered w-20';
+    const opCol = c !== 'name';
+    input.placeholder = opCol ? '=,>,<  [1,5]  (1,2)' : 'Filter…';
+    input.title = opCol
+      ? 'Operators: =, >, <, >=, <=, ! (default =)\nRange: [min,max]\nList: (v1,v2,v3)'
+      : 'Filter this column';
+    input.value = this._colFilters[c] || '';
+    const x = document.createElement('button');
+    x.type = 'button';
+    x.className = 'btn btn-ghost btn-xs btn-square';
+    x.title = 'Cancel filter';
+    x.innerHTML = '<i data-lucide="x" class="size-3.5"></i>';
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        const val = input.value.trim();
+        if (val) this._colFilters[c] = val;
+        else delete this._colFilters[c];
+        this._lastFilterKey = c;
+        this.page = 1;
+        this.loadTables();
+      } else if (e.key === 'Escape') {
+        this.exitHeaderFilter(th, col);
+      }
+    });
+    x.addEventListener('click', () => this.exitHeaderFilter(th, col));
+    box.append(input, x);
+    th.appendChild(box);
+    if (window.lucide) window.lucide.createIcons({ root: th });
+    input.focus();
+
+    // The table name filters live as you type. Because loadTables() re-renders
+    // the whole grid (and its headers), remember this column so renderHeaderLabel
+    // re-opens the input with focus and the caret restored after each reload.
+    if (c === 'name') {
+      input.addEventListener('input', () => {
+        clearTimeout(this._nameFilterTimer);
+        const val = input.value;
+        const caret = input.selectionStart;
+        this._nameFilterTimer = setTimeout(() => {
+          const v = val.trim();
+          if (v) this._colFilters[c] = v;
+          else delete this._colFilters[c];
+          this.page = 1;
+            this._reopenFilter = { key: c, value: val, caret };
+            this._lastFilterKey = c;
+            this.loadTables();
+        }, 250);
+      });
+    }
+  }
+
+  // Exits filter-input mode: clears any active filter for the column and
+  // re-queries when that changed the result, otherwise restores the label.
+  exitHeaderFilter(th, col) {
+    const c = col.key;
+    const had = !!this._colFilters[c];
+    if (had) { delete this._colFilters[c]; this.page = 1; this.loadTables(); }
+    else this.renderHeaderLabel(th, col);
   }
 
   pagination(d, totalPages) {

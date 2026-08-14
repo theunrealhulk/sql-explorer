@@ -3,6 +3,46 @@
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>SQL Explorer</title>
 <link href="/output.css" rel="stylesheet"><link href="/vendor/jsoneditor/jsoneditor.min.css" rel="stylesheet"><script src="/vendor/lucide/lucide.min.js"></script><script src="/vendor/d3/d3.min.js"></script><script src="/vendor/jsoneditor/jsoneditor.min.js"></script><script src="/table-details.js" defer></script><script src="/db-details.js" defer></script><script src="/view-details.js" defer></script><script src="/vendor/codemirror/codemirror.js" defer></script><script src="/sql-tab.js" defer></script>
 <style>
+/* Animated glowing border shown around a results table while any column/search
+   filter is active. Applied by table-details, db-details and sql-tab. */
+@keyframes filterBorderPulse {
+  0%, 100% {
+    box-shadow: 0 0 0 1px var(--color-primary, #3b82f6),
+                0 0 6px 0 color-mix(in oklab, var(--color-primary, #3b82f6) 45%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 0 2px var(--color-primary, #3b82f6),
+                0 0 16px 3px color-mix(in oklab, var(--color-primary, #3b82f6) 70%, transparent);
+  }
+}
+.filter-active-border {
+  border-radius: 0.5rem;
+  animation: filterBorderPulse 1.6s ease-in-out infinite;
+}
+/* Tabs inside detail components are driven by the breadcrumb action buttons,
+   so hide the in-component tab bar while keeping the radios functional. */
+#detail .tabs > input[role="tab"] { display: none !important; }
+/* Keep the JSONEditor menu bar (search / expand / collapse) pinned to the top
+   of the results pane while the JSON tree scrolls underneath it. The editor is
+   given a bounded height so its own internal container scrolls; this keeps the
+   menu visible AND lets the search next/previous buttons scroll to matches. */
+.sql-json-view {
+  height: 60vh;
+}
+.sql-json-view .jsoneditor {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+.sql-json-view .jsoneditor-menu,
+.sql-json-view .jsoneditor-search {
+  flex: 0 0 auto;
+}
+.sql-json-view .jsoneditor-outer {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
 /* JSONEditor dark theme — applied only under daisyUI dark theme */
 html[data-theme="dark"] .jsoneditor,
 html[data-theme="dark"] .jsoneditor-menu {
@@ -100,7 +140,7 @@ html[data-theme="dark"] .json-null { color: #d2a8ff; }
           </label>
         </div>
         <div class="flex-1 flex items-center gap-2 px-2">
-          <span class="text-lg font-bold flex items-center gap-2"><i data-lucide="database" class="size-5"></i>SQL Explorer</span>
+          <span class="text-lg font-bold flex items-center gap-2"><img id="engine-logo" src="/assets/microsoft-sql-server-logo-svgrepo-com.svg" alt="" class="size-5" /><span id="engine-title">SQL Server</span></span>
           <div id="db-tabs" class="flex items-center gap-1"></div>
         </div>
         <label class="swap swap-rotate btn btn-ghost btn-circle">
@@ -123,6 +163,7 @@ html[data-theme="dark"] .json-null { color: #d2a8ff; }
             <ul id="crumbs-list"><li>Server</li></ul>
           </div>
           <span id="crumb-info" class="hidden alert alert-info alert-soft border border-info grow py-1 text-sm font-medium"></span>
+          <div id="crumb-actions" class="flex items-center gap-2"></div>
         </div>
         <div id="status"></div>
         <p id="placeholder" class="text-base-content/60">Connect and pick databases and objects from the explorer on the side.</p>
@@ -414,6 +455,60 @@ function renderInfo() {
   } else {
     crumbInfo.textContent = 'Connected. ' + totalDbs + ' databases.';
   }
+
+  updateCrumbActions();
+}
+
+// Rebuilds the crumb action buttons from the tab controller exposed by the
+// currently mounted detail component (<table-details>/<db-details>/
+// <view-details>). Each button switches the component's active tab and the
+// active one is highlighted. When no tabbed component is present the row is
+// cleared.
+const CRUMB_TAB_ICONS = {
+  Data: 'table', Tables: 'table', Structure: 'list-tree',
+  Relations: 'folder-tree', SQL: 'scroll-text', Query: 'scroll-text',
+};
+
+function updateCrumbActions() {
+  const host = document.getElementById('crumb-actions');
+  if (!host) return;
+  host.innerHTML = '';
+  const comp = document.querySelector('#detail table-details, #detail db-details, #detail view-details');
+  const ctrl = comp && comp.tabController;
+  if (!ctrl) return;
+  const tabs = ctrl.tabs();
+  if (!tabs || tabs.length < 2) return;
+  const active = ctrl.activeTab();
+
+  // Tabs to disable in the database context: "Tables" when the database has no
+  // tables, "Relations" when it has no foreign-key relations between tables.
+  const disabled = new Set();
+  if (comp.tagName === 'DB-DETAILS' && currentDb) {
+    const counts = dbCounts[currentDb] || {};
+    const fkTotal = (dbTables[currentDb] || []).reduce((sum, t) => sum + (t.fkCount || 0), 0);
+    if (!counts.Tables) disabled.add('Tables');
+    if (!fkTotal) disabled.add('Relations');
+  }
+
+  tabs.forEach(label => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    const isDisabled = disabled.has(label);
+    btn.disabled = isDisabled;
+    btn.className = 'btn btn-sm ' +
+      (isDisabled ? 'btn-ghost btn-disabled cursor-not-allowed opacity-50'
+                  : (label === active ? 'btn-primary' : 'btn-ghost'));
+    const icon = CRUMB_TAB_ICONS[label] || 'square';
+    btn.innerHTML = '<i data-lucide="' + icon + '" class="size-4"></i>' + label;
+    if (!isDisabled) {
+      btn.addEventListener('click', () => {
+        ctrl.select(label);
+        updateCrumbActions();
+      });
+    }
+    host.appendChild(btn);
+  });
+  if (window.lucide) window.lucide.createIcons({ root: host });
 }
 
 function selectDb(db) {
@@ -648,6 +743,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   const savedCs = localStorage.getItem('connection-string');
   if (savedCs) {
     document.getElementById('cs').value = savedCs;
+    updateEngineBranding(savedCs);
     connect();
     return;
   }
@@ -655,6 +751,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   const data = await res.json();
   if (data.connectionString) {
     document.getElementById('cs').value = data.connectionString;
+    updateEngineBranding(data.connectionString);
   }
 });
 
@@ -1057,8 +1154,34 @@ async function api(path, body) {
   return res.json();
 }
 
+// Maps a connection string to a database engine so the header logo/title can
+// reflect the active engine. Add new engines here as they are supported.
+const DB_ENGINES = [
+  { key: 'postgres', logo: '/assets/postgresql-logo-svgrepo-com.svg', title: 'PostgreSQL', test: cs => /postgres|postgresql|host=.*port=5432/i.test(cs) },
+  { key: 'mariadb', logo: '/assets/mariadb-svgrepo-com.svg', title: 'MariaDB', test: cs => /mariadb/i.test(cs) },
+  { key: 'mysql', logo: '/assets/mysql-svgrepo-com.svg', title: 'MySQL', test: cs => /mysql/i.test(cs) },
+  { key: 'sqlite', logo: '/assets/sqlite-svgrepo-com.svg', title: 'SQLite', test: cs => /sqlite|\.db\b|\.sqlite\b/i.test(cs) },
+  // Default / fallback engine.
+  { key: 'sqlserver', logo: '/assets/microsoft-sql-server-logo-svgrepo-com.svg', title: 'SQL Server', test: () => true },
+];
+
+function detectEngine(cs) {
+  const s = String(cs || '');
+  return DB_ENGINES.find(e => e.test(s)) || DB_ENGINES[DB_ENGINES.length - 1];
+}
+
+// Updates the header logo and title based on the current connection string.
+function updateEngineBranding(cs) {
+  const engine = detectEngine(cs);
+  const logo = document.getElementById('engine-logo');
+  const title = document.getElementById('engine-title');
+  if (logo) { logo.src = engine.logo; logo.alt = engine.title; }
+  if (title) title.textContent = engine.title;
+}
+
 async function connect() {
   CS = document.getElementById('cs').value;
+  updateEngineBranding(CS);
   const status = document.getElementById('status');
   const tree = document.getElementById('tree');
   tree.innerHTML = '';

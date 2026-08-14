@@ -65,6 +65,11 @@ class TableDetails extends HTMLElement {
 
   disconnectedCallback() {
     if (this._onDocClick) document.removeEventListener('click', this._onDocClick);
+    if (this._relKeyHandler) {
+      window.removeEventListener('keydown', this._relKeyHandler);
+      window.removeEventListener('keyup', this._relKeyHandler);
+      this._relKeyHandler = null;
+    }
     if (this._jsonEditor) { this._jsonEditor.destroy(); this._jsonEditor = null; }
     if (this._relSim) { this._relSim.stop(); this._relSim = null; }
     if (this._sqlCtrl) { this._sqlCtrl.destroy(); this._sqlCtrl = null; }
@@ -201,6 +206,26 @@ class TableDetails extends HTMLElement {
       });
     });
     if (active === 'SQL') this.loadSqlTab();
+    if (window.updateCrumbActions) window.updateCrumbActions();
+  }
+
+  // Exposes a small controller so an external UI (the breadcrumb action
+  // buttons) can drive tab switching.
+  get tabController() {
+    const self = this;
+    return {
+      tabs: () => self.allowedTabs,
+      activeTab: () => {
+        const checked = self.querySelector('input[role="tab"]:checked');
+        return checked ? checked.getAttribute('aria-label') : self.allowedTabs[0];
+      },
+      select: (label) => {
+        const input = self.querySelector('input[role="tab"][aria-label="' + label + '"]');
+        if (!input) return;
+        input.checked = true;
+        input.dispatchEvent(new Event('change'));
+      },
+    };
   }
 
   // Mounts the shared editable SQL editor into the SQL tab, once.
@@ -461,6 +486,7 @@ class TableDetails extends HTMLElement {
   renderTable(target, d, visible) {
     const wrap = document.createElement('div');
     wrap.className = 'overflow-x-auto';
+    if (Object.values(this._colFilters).some(v => v)) wrap.classList.add('filter-active-border');
     const table = document.createElement('table');
     table.className = 'table table-zebra table-sm';
 
@@ -489,6 +515,18 @@ class TableDetails extends HTMLElement {
     table.appendChild(tbody);
     wrap.appendChild(table);
     target.appendChild(wrap);
+  }
+
+  // Returns true when the given Data-tab column is numeric or date-typed, so
+  // its filter accepts comparison operators (=, >, <, >=, <=, !).
+  isOperatorColumn(c) {
+    const NUM = new Set(['int', 'bigint', 'smallint', 'tinyint', 'decimal', 'numeric',
+      'float', 'real', 'money', 'smallmoney', 'bit']);
+    const DATE = new Set(['date', 'datetime', 'datetime2', 'smalldatetime', 'datetimeoffset', 'time']);
+    const col = (this._structColumns || []).find(x => x.name === c);
+    if (!col) return false;
+    const t = String(col.type || '').toLowerCase();
+    return NUM.has(t) || DATE.has(t);
   }
 
   // Column header in label mode: the column name plus a filter toggle icon.
@@ -546,8 +584,12 @@ class TableDetails extends HTMLElement {
     box.className = 'flex items-center gap-1';
     const input = document.createElement('input');
     input.type = 'text';
-    input.className = 'input input-xs input-bordered w-14';
-    input.placeholder = 'Filter…';
+    input.className = 'input input-xs input-bordered w-20';
+    const opCol = this.isOperatorColumn(c);
+    input.placeholder = opCol ? '=,>,<  [1,5]  (1,2)' : 'Filter…';
+    input.title = opCol
+      ? 'Operators: =, >, <, >=, <=, ! (default =)\nRange: [min,max]\nList: (v1,v2,v3)'
+      : 'Filter this column';
     input.value = this._colFilters[c] || '';
     const x = document.createElement('button');
     x.type = 'button';
@@ -1132,7 +1174,7 @@ class TableDetails extends HTMLElement {
     box.className = 'flex items-center gap-1';
     const input = document.createElement('input');
     input.type = 'text';
-    input.className = 'input input-xs input-bordered w-14';
+    input.className = 'input input-xs input-bordered w-20';
     input.placeholder = 'Filter…';
     input.value = this._structColFilters[c] || '';
     const x = document.createElement('button');
@@ -1263,7 +1305,7 @@ class TableDetails extends HTMLElement {
 
     const hint = document.createElement('p');
     hint.className = 'mb-2 text-xs text-base-content/50';
-    hint.textContent = 'Click a node to see its details in an overlay. Double-click a node to switch to that table.';
+    hint.textContent = 'Click a node to see its details in an overlay. Ctrl+click a node to switch to that table.';
     target.appendChild(hint);
 
     const center = { id: this.table, group: 'center', color: colorCenter, r: 14 };
@@ -1329,13 +1371,27 @@ class TableDetails extends HTMLElement {
 
     node.style('cursor', 'pointer')
       .on('click', (event, d) => {
+        if (event.ctrlKey || event.metaKey) {
+          event.stopPropagation();
+          this.navigateToTable(d.id);
+          return;
+        }
         if (d.__moved) return;
         this.showNodeOverlay(d, links, target);
       })
-      .on('dblclick', (event, d) => {
-        event.stopPropagation();
-        this.navigateToTable(d.id);
-      });
+      .on('mouseenter', (event) => {
+        this._hoverNodeEl = event.currentTarget;
+        this.updateHoverUnderline(event.ctrlKey || event.metaKey);
+      })
+      .on('mousemove', (event) => this.updateHoverUnderline(event.ctrlKey || event.metaKey))
+      .on('mouseleave', () => { this.updateHoverUnderline(false); this._hoverNodeEl = null; });
+
+    // Toggle the hovered node's underline as Ctrl/Cmd is pressed or released.
+    if (!this._relKeyHandler) {
+      this._relKeyHandler = (e) => this.updateHoverUnderline(e.ctrlKey || e.metaKey);
+      window.addEventListener('keydown', this._relKeyHandler);
+      window.addEventListener('keyup', this._relKeyHandler);
+    }
 
     node.append('circle')
       .attr('r', d => d.r)
@@ -1372,7 +1428,15 @@ class TableDetails extends HTMLElement {
     target.appendChild(svg.node());
   }
 
-  // Navigates the app to another table by name (double-click on a node).
+  // Underlines the currently hovered node's label while Ctrl/Cmd is held, to
+  // signal that a Ctrl+click will open (navigate to) that table.
+  updateHoverUnderline(on) {
+    if (!this._hoverNodeEl) return;
+    const text = this._hoverNodeEl.querySelector('text');
+    if (text) text.style.textDecoration = on ? 'underline' : '';
+  }
+
+  // Navigates the app to another table by name (Ctrl/Cmd+click on a node).
   navigateToTable(name) {
     try {
       if (typeof selectTable !== 'function') return;

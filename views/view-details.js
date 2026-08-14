@@ -73,6 +73,26 @@ class ViewDetails extends HTMLElement {
     }
     if (allowed.includes('Data')) this.buildData();
     if (allowed.includes('Query')) this.loadQuery();
+    if (window.updateCrumbActions) window.updateCrumbActions();
+  }
+
+  // Exposes a small controller so an external UI (the breadcrumb action
+  // buttons) can drive tab switching.
+  get tabController() {
+    const self = this;
+    return {
+      tabs: () => self.allowedTabs,
+      activeTab: () => {
+        const checked = self.querySelector('input[role="tab"]:checked');
+        return checked ? checked.getAttribute('aria-label') : self.allowedTabs[0];
+      },
+      select: (label) => {
+        const input = self.querySelector('input[role="tab"][aria-label="' + label + '"]');
+        if (!input) return;
+        input.checked = true;
+        input.dispatchEvent(new Event('change'));
+      },
+    };
   }
 
   // ---- Data tab ----------------------------------------------------------
