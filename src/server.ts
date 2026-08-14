@@ -8,7 +8,14 @@ app.use(express.json());
 
 // Static assets and views live at the project root, one level above the compiled dist/ dir.
 const viewsDir = path.join(__dirname, '..', 'views');
-app.use(express.static(viewsDir));
+app.use(
+  express.static(viewsDir, {
+    setHeaders: (res, filePath) => {
+      // Never cache HTML so clients always get the latest UI/JS.
+      if (filePath.endsWith('.html')) res.set('Cache-Control', 'no-store');
+    },
+  })
+);
 
 // Database engine logo assets (svg files under assets/).
 app.use('/assets', express.static(path.join(__dirname, '..', 'assets')));
@@ -32,7 +39,10 @@ app.use(
 );
 
 // View
-app.get('/', (_req, res) => res.sendFile(path.join(viewsDir, 'index.html')));
+app.get('/', (_req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.sendFile(path.join(viewsDir, 'index.html'));
+});
 
 // API routes -> controllers
 app.use('/api', apiRoutes);

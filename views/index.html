@@ -162,6 +162,7 @@ html[data-theme="dark"] .json-null { color: #d2a8ff; }
           <div class="breadcrumbs text-sm">
             <ul id="crumbs-list"><li>Server</li></ul>
           </div>
+          <span id="global-loading" class="hidden items-center gap-1 text-sm text-base-content/70"><span class="loading loading-spinner loading-sm"></span>Loading…</span>
           <span id="crumb-info" class="hidden alert alert-info alert-soft border border-info grow py-1 text-sm font-medium"></span>
           <div id="crumb-actions" class="flex items-center gap-2"></div>
         </div>
@@ -225,6 +226,20 @@ html[data-theme="dark"] .json-null { color: #d2a8ff; }
     </form>
   </dialog>
 
+  <dialog id="confirm-modal" class="modal">
+    <div class="modal-box max-w-md">
+      <h3 class="text-lg font-bold flex items-center gap-2 text-error"><i data-lucide="trash-2" class="size-5"></i>Delete entry</h3>
+      <p id="confirm-message" class="py-3 text-sm"></p>
+      <div class="modal-action">
+        <button id="confirm-no" type="button" class="btn btn-sm">No</button>
+        <button id="confirm-yes" type="button" class="btn btn-error btn-sm">Yes, delete</button>
+      </div>
+    </div>
+    <form method="dialog" class="modal-backdrop">
+      <button aria-label="Close">close</button>
+    </form>
+  </dialog>
+
 <script>
 let CS = '';
 let currentDb = null;      // last selected database
@@ -270,45 +285,119 @@ function renderCrumbs() {
 }
 
 // --- Tabs -----------------------------------------------------------------
-// Each tab keeps its own navigation context (selected db / object). All tabs
-// share the same connection string. There is always at least one tab.
-let tabs = [];             // [{ id, context: { db, name, kind } | null }]
+// Each tab keeps its own database engine (via its connection string `cs`) and
+// its own navigation context (selected db / object). There is always at least
+// one tab.
+let tabs = [];             // [{ id, cs, context: { db, name, kind } | null, type }]
 let activeTabId = null;
 let tabSeq = 0;
 
 function activeTab() { return tabs.find(t => t.id === activeTabId) || null; }
+// Connection string of the active tab (empty string when none).
+function activeCs() { const t = activeTab(); return (t && t.cs) || ''; }
 
-// Loads tabs from localStorage, migrating the legacy single-context storage
-// into a default first tab the first time around.
+// Loads tabs from localStorage. Storage is organized as a collection of
+// engine profiles: { profiles: [{ engine, tabs: [...] }], activeTabId }. On
+// load the profiles are flattened back into the runtime `tabs` array. Legacy
+// single-connection storage is migrated the first time around.
 function loadTabs() {
   let saved = null;
-  try { saved = JSON.parse(localStorage.getItem('sql-explorer-tabs') || 'null'); } catch (e) { saved = null; }
-  if (saved && Array.isArray(saved.tabs) && saved.tabs.length) {
-    tabs = saved.tabs.map(t => ({ id: t.id, context: t.context || null }));
+  try { saved = JSON.parse(localStorage.getItem('sql-explorer-profiles') || 'null'); } catch (e) { saved = null; }
+  if (saved && Array.isArray(saved.profiles) && saved.profiles.length) {
+    tabs = [];
+    saved.profiles.forEach(p => {
+      (p.tabs || []).forEach(t => {
+        tabs.push({ id: t.id, cs: t.cs || '', context: t.context || null, type: t.type || null });
+      });
+    });
+    if (!tabs.length) tabs = [{ id: 1, cs: '', context: null, type: null }];
+    // Restore the saved left-to-right order (profiles are grouped by engine, so
+    // the flat order is tracked separately).
+    if (Array.isArray(saved.tabOrder) && saved.tabOrder.length) {
+      tabs.sort((a, b) => {
+        const ia = saved.tabOrder.indexOf(a.id);
+        const ib = saved.tabOrder.indexOf(b.id);
+        return (ia === -1 ? Infinity : ia) - (ib === -1 ? Infinity : ib);
+      });
+    }
     tabSeq = Math.max(...tabs.map(t => t.id));
     activeTabId = tabs.some(t => t.id === saved.activeTabId) ? saved.activeTabId : tabs[0].id;
-  } else {
-    let legacy = null;
-    try { legacy = JSON.parse(localStorage.getItem('crumb-context') || 'null'); } catch (e) { legacy = null; }
-    tabSeq = 1;
-    tabs = [{ id: 1, context: (legacy && legacy.db) ? legacy : null }];
-    activeTabId = 1;
+    return;
   }
+  // Legacy migration: previous format kept a single shared connection string
+  // and a flat `sql-explorer-tabs` list.
+  let legacyTabs = null;
+  try { legacyTabs = JSON.parse(localStorage.getItem('sql-explorer-tabs') || 'null'); } catch (e) { legacyTabs = null; }
+  const legacyCs = localStorage.getItem('connection-string') || '';
+  if (legacyTabs && Array.isArray(legacyTabs.tabs) && legacyTabs.tabs.length) {
+    tabs = legacyTabs.tabs.map(t => ({ id: t.id, cs: legacyCs, context: t.context || null, type: t.type || null }));
+    tabSeq = Math.max(...tabs.map(t => t.id));
+    activeTabId = tabs.some(t => t.id === legacyTabs.activeTabId) ? legacyTabs.activeTabId : tabs[0].id;
+    return;
+  }
+  let legacy = null;
+  try { legacy = JSON.parse(localStorage.getItem('crumb-context') || 'null'); } catch (e) { legacy = null; }
+  tabSeq = 1;
+  tabs = [{ id: 1, cs: legacyCs, context: (legacy && legacy.db) ? legacy : null, type: null }];
+  activeTabId = 1;
 }
 
 function saveTabs() {
   if (window.saveEnabled && !window.saveEnabled('tabs')) return;
   try {
-    localStorage.setItem('sql-explorer-tabs', JSON.stringify({
-      tabs: tabs.map(t => ({ id: t.id, context: t.context })),
-      activeTabId,
-    }));
+    // Group tabs into engine profiles keyed by the engine detected from each
+    // tab's connection string. Connection tabs (no cs yet) go under a
+    // dedicated "new" profile so they still persist.
+    const profileMap = {};
+    const order = [];
+    tabs.forEach(t => {
+      const engineKey = t.cs ? detectEngine(t.cs).key : 'new';
+      if (!profileMap[engineKey]) { profileMap[engineKey] = []; order.push(engineKey); }
+      profileMap[engineKey].push({ id: t.id, cs: t.cs || '', context: t.context, type: t.type || null });
+    });
+    const profiles = order.map(engine => ({ engine, tabs: profileMap[engine] }));
+    // Persist the flat left-to-right tab order separately so it survives the
+    // engine grouping above and can be restored exactly on reload.
+    const tabOrder = tabs.map(t => t.id);
+    localStorage.setItem('sql-explorer-profiles', JSON.stringify({ profiles, activeTabId, tabOrder }));
   } catch (e) { /* ignore */ }
 }
 
 // Distinct per-tab accent colors (stable per tab id, cycled).
 const TAB_COLORS = ['#f97316', '#22c55e', '#3b82f6', '#a855f7', '#ec4899', '#14b8a6', '#eab308', '#ef4444', '#06b6d4', '#8b5cf6'];
 function tabColor(id) { return TAB_COLORS[(Math.abs(id) - 1) % TAB_COLORS.length]; }
+
+// Id of the tab currently being dragged for reordering (null when not dragging).
+let dragTabId = null;
+
+// Draws a colored edge on a tab button to show where the dragged tab will land.
+function showDropIndicator(btn, after) {
+  const bar = document.getElementById('db-tabs');
+  if (bar) bar.querySelectorAll('button[data-tab-id]').forEach(b => { b.style.boxShadow = ''; });
+  const edge = after ? '2px 0 0 0' : '-2px 0 0 0';
+  btn.style.boxShadow = 'inset ' + edge + ' var(--color-primary, #3b82f6)';
+}
+
+// Removes any active drop indicator outline from the tab strip.
+function clearDropIndicator() {
+  const bar = document.getElementById('db-tabs');
+  if (bar) bar.querySelectorAll('button[data-tab-id]').forEach(b => { b.style.boxShadow = ''; });
+}
+
+// Moves the dragged tab so it sits before or after the tab it was dropped on,
+// then re-renders and persists the new order.
+function reorderTabs(fromId, toId, after) {
+  if (fromId == null || toId == null || fromId === toId) return;
+  const fromIdx = tabs.findIndex(t => t.id === fromId);
+  const toIdx = tabs.findIndex(t => t.id === toId);
+  if (fromIdx === -1 || toIdx === -1) return;
+  const [moved] = tabs.splice(fromIdx, 1);
+  let insertAt = tabs.findIndex(t => t.id === toId);
+  if (after) insertAt += 1;
+  tabs.splice(insertAt, 0, moved);
+  renderTabs();
+  saveTabs();
+}
 
 // Renders the tab strip next to the title plus the trailing "new tab" button.
 function renderTabs() {
@@ -327,8 +416,31 @@ function renderTabs() {
       btn.style.borderColor = color;
     }
     const label = document.createElement('span');
-    const dbName = isActive ? currentDb : (tab.context && tab.context.db);
-    label.textContent = dbName || 'Server';
+    label.className = 'inline-flex items-center gap-1';
+    if (tab.type === 'connection') {
+      // Connection tabs show an unplug icon and a fixed "New connection" label.
+      label.appendChild(icon('unplug'));
+      const txt = document.createElement('span');
+      txt.textContent = 'New connection';
+      label.appendChild(txt);
+    } else {
+      // Show the engine's SVG logo (derived from this tab's own connection
+      // string) alongside the database (or "Server") name.
+      const engine = detectEngine(tab.cs || '');
+      if (engine && engine.logo) {
+        const logo = document.createElement('img');
+        logo.src = engine.logo;
+        logo.alt = engine.title || '';
+        logo.className = 'size-4 shrink-0';
+        logo.setAttribute('nopin', 'nopin');
+        logo.setAttribute('data-pin-nopin', 'true');
+        label.appendChild(logo);
+      }
+      const dbName = isActive ? currentDb : (tab.context && tab.context.db);
+      const txt = document.createElement('span');
+      txt.textContent = dbName || 'Server';
+      label.appendChild(txt);
+    }
     btn.appendChild(label);
     btn.addEventListener('click', () => switchTab(tab.id));
     if (tabs.length > 1) {
@@ -339,6 +451,39 @@ function renderTabs() {
       close.addEventListener('click', (e) => { e.stopPropagation(); closeTab(tab.id); });
       btn.appendChild(close);
     }
+    // Enable drag-and-drop reordering of tabs.
+    btn.draggable = true;
+    btn.dataset.tabId = tab.id;
+    btn.addEventListener('dragstart', (e) => {
+      dragTabId = tab.id;
+      btn.style.opacity = '0.4';
+      if (e.dataTransfer) { e.dataTransfer.effectAllowed = 'move'; }
+    });
+    btn.addEventListener('dragend', () => {
+      dragTabId = null;
+      btn.style.opacity = '';
+      clearDropIndicator();
+    });
+    btn.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+      if (dragTabId == null || dragTabId === tab.id) return;
+      // Outline the edge where the dragged tab would be inserted.
+      const rect = btn.getBoundingClientRect();
+      const after = e.clientX > rect.left + rect.width / 2;
+      showDropIndicator(btn, after);
+    });
+    btn.addEventListener('dragleave', () => {
+      btn.style.boxShadow = '';
+    });
+    btn.addEventListener('drop', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const rect = btn.getBoundingClientRect();
+      const after = e.clientX > rect.left + rect.width / 2;
+      clearDropIndicator();
+      reorderTabs(dragTabId, tab.id, after);
+    });
     bar.appendChild(btn);
   });
   const add = document.createElement('button');
@@ -347,6 +492,12 @@ function renderTabs() {
   add.appendChild(icon('plus'));
   add.addEventListener('click', newTab);
   bar.appendChild(add);
+  const connectBtn = document.createElement('button');
+  connectBtn.className = 'btn btn-sm btn-ghost btn-square';
+  connectBtn.title = 'New connection';
+  connectBtn.appendChild(icon('unplug'));
+  connectBtn.addEventListener('click', newConnectionTab);
+  bar.appendChild(connectBtn);
   // Match the main content border to the active tab's color.
   const main = document.getElementById('main-content');
   if (main) main.style.borderColor = tabColor(activeTabId);
@@ -358,20 +509,57 @@ function switchTab(id) {
   saveContext();               // capture the current selection into its tab
   activeTabId = id;
   navHistory = []; navIndex = -1; updateNavButtons();
-  renderTabs();
   const tab = activeTab();
-  applyContext(tab ? tab.context : null);
-  saveTabs();
+  // Each tab carries its own engine/connection: switch the active connection
+  // string, rebrand the header, and reconnect so the sidebar and content match
+  // the tab's engine.
+  CS = (tab && tab.cs) || '';
+  const csInput = document.getElementById('cs');
+  if (csInput) csInput.value = CS;
+  updateEngineBranding(CS);
+  renderTabs();
+  if (CS && (!tab || tab.type !== 'connection')) {
+    connect();                 // rebuilds tree + applies this tab's context
+  } else {
+    applyContext(tab ? tab.context : null);
+    saveTabs();
+  }
 }
 
 function newTab() {
   saveContext();
-  const tab = { id: ++tabSeq, context: null };
+  // A plain new tab inherits the active tab's engine/connection.
+  const inheritedCs = activeCs();
+  const tab = { id: ++tabSeq, cs: inheritedCs, context: null, type: null };
   tabs.push(tab);
   activeTabId = tab.id;
   navHistory = []; navIndex = -1; updateNavButtons();
+  // Carry over the active engine so the header logo/text and sidebar match.
+  CS = inheritedCs;
+  const csInput = document.getElementById('cs');
+  if (csInput) csInput.value = CS;
+  updateEngineBranding(CS);
   renderTabs();
-  applyContext(null);          // fresh tab starts at the server view
+  if (CS) {
+    connect();                 // rebuild tree/sidebar for the inherited engine
+  } else {
+    applyContext(null);        // no engine yet: start at the server view
+    saveTabs();
+  }
+}
+
+// Opens a closable "New connection" tab that shows the database-engine picker.
+function newConnectionTab() {
+  saveContext();
+  const tab = { id: ++tabSeq, cs: '', context: null, type: 'connection' };
+  tabs.push(tab);
+  activeTabId = tab.id;
+  CS = '';
+  const csInput = document.getElementById('cs');
+  if (csInput) csInput.value = '';
+  navHistory = []; navIndex = -1; updateNavButtons();
+  renderTabs();
+  applyContext(null);
   saveTabs();
 }
 
@@ -384,8 +572,17 @@ function closeTab(id) {
     const next = tabs[idx] || tabs[idx - 1] || tabs[0];
     activeTabId = next.id;
     navHistory = []; navIndex = -1; updateNavButtons();
+    // Adopt the newly-active tab's engine/connection.
+    CS = (next && next.cs) || '';
+    const csInput = document.getElementById('cs');
+    if (csInput) csInput.value = CS;
+    updateEngineBranding(CS);
     renderTabs();
-    applyContext(next.context);
+    if (CS && next.type !== 'connection') {
+      connect();
+    } else {
+      applyContext(next.context);
+    }
   } else {
     renderTabs();
   }
@@ -485,9 +682,22 @@ function updateCrumbActions() {
   const disabled = new Set();
   if (comp.tagName === 'DB-DETAILS' && currentDb) {
     const counts = dbCounts[currentDb] || {};
-    const fkTotal = (dbTables[currentDb] || []).reduce((sum, t) => sum + (t.fkCount || 0), 0);
-    if (!counts.Tables) disabled.add('Tables');
-    if (!fkTotal) disabled.add('Relations');
+    // Foreign-key relations may be known from the loaded table list or, when the
+    // sidebar node hasn't been expanded yet, from the per-database stats.
+    const fkFromTables = (dbTables[currentDb] || []).reduce((sum, t) => sum + (t.fkCount || 0), 0);
+    const statEntry = dbStats.find(s => s.name === currentDb);
+    const fkFromStats = statEntry ? (statEntry.relations || 0) : 0;
+    const hasRelations = fkFromTables > 0 || fkFromStats > 0;
+    const hasTables = (counts.Tables || 0) > 0 || (statEntry ? (statEntry.tables || 0) > 0 : false);
+    if (!hasTables) disabled.add('Tables');
+    if (!hasRelations) disabled.add('Relations');
+  } else if (comp.tagName === 'TABLE-DETAILS' && currentTable) {
+    // Relations: disabled when the table neither has foreign keys nor is
+    // referenced by other tables. Data: disabled when the table has no rows.
+    const hasFk = (currentTable.fkCount || 0) > 0;
+    const hasReferencedBy = (currentTable.referencedByCount || 0) > 0;
+    if (!hasFk && !hasReferencedBy) disabled.add('Relations');
+    if (currentTable.rowCount != null && Number(currentTable.rowCount) === 0) disabled.add('Data');
   }
 
   tabs.forEach(label => {
@@ -694,6 +904,170 @@ function renderServerHome() {
   refreshIcons();
 }
 
+// Renders a connection picker in the main content area: a grid of the supported
+// RDBMS engines plus a connection-string input. The input stays disabled until
+// an engine is selected.
+function renderConnectionPicker() {
+  const placeholder = document.getElementById('placeholder');
+  if (placeholder) placeholder.style.display = 'none';
+  const host = document.getElementById('detail');
+  if (!host) return;
+  host.innerHTML = '';
+
+  const wrap = document.createElement('div');
+  wrap.className = 'space-y-4';
+
+  const heading = document.createElement('h3');
+  heading.className = 'text-lg font-bold';
+  heading.textContent = 'Select a database engine';
+  wrap.appendChild(heading);
+
+  const grid = document.createElement('div');
+  grid.style.display = 'grid';
+  grid.style.gap = '1rem';
+  grid.style.gridTemplateColumns = 'repeat(auto-fill, minmax(11rem, 1fr))';
+
+  // Connection-string example per engine, used to guide the user's input.
+  const CS_EXAMPLES = {
+    sqlserver: 'Server=localhost,1433;User Id=sa;Password=your_password;TrustServerCertificate=True;',
+    postgres: 'Host=localhost;Port=5432;Database=postgres;Username=postgres;Password=your_password;',
+    mysql: 'Server=localhost;Port=3306;Database=mysql;Uid=root;Pwd=your_password;',
+    mariadb: 'Server=localhost;Port=3306;Database=mariadb;Uid=root;Pwd=your_password;',
+    sqlite: 'Data Source=./path/to/database.sqlite;',
+  };
+
+  // Show SQL Server first so the grid order matches the default engine.
+  const engines = DB_ENGINES.slice().sort((a, b) => (a.key === 'sqlserver' ? -1 : b.key === 'sqlserver' ? 1 : 0));
+
+  let selectedEngine = null;
+  const cards = [];
+
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'input input-bordered w-full';
+  input.placeholder = 'Select a database engine to enter a connection string';
+  input.disabled = true;
+
+  const connectBtn = document.createElement('button');
+  connectBtn.type = 'button';
+  connectBtn.className = 'btn btn-primary btn-sm';
+  connectBtn.disabled = true;
+  connectBtn.appendChild(icon('plug'));
+  connectBtn.appendChild(document.createTextNode('Connect'));
+
+  engines.forEach(engine => {
+    const enabled = engine.key === 'sqlserver' || engine.key === 'sqlite';
+    const card = document.createElement('button');
+    card.type = 'button';
+    card.className = 'card bg-base-100 border border-base-300 p-4 flex flex-col items-center gap-2 shadow-sm';
+    card.style.cursor = enabled ? 'pointer' : 'not-allowed';
+    card.style.position = 'relative';
+    card.style.transition = 'border-color .15s, box-shadow .15s, transform .15s';
+    if (!enabled) {
+      card.disabled = true;
+      card.style.opacity = '.4';
+      card.title = 'soon';
+    }
+
+    // Hover badge that reads "Use" (shown on hover, hidden by default).
+    const useBadge = document.createElement('span');
+    useBadge.className = 'badge badge-error badge-sm';
+    useBadge.textContent = 'Use';
+    useBadge.style.position = 'absolute';
+    useBadge.style.top = '.5rem';
+    useBadge.style.left = '.5rem';
+    useBadge.style.display = 'none';
+
+    card.addEventListener('mouseenter', () => {
+      if (!enabled) return;
+      useBadge.style.display = '';
+      if (selectedEngine === engine) return;
+      card.style.borderColor = 'var(--color-primary, #3b82f6)';
+      card.style.boxShadow = '0 4px 12px rgba(0,0,0,.15)';
+      card.style.transform = 'translateY(-2px)';
+    });
+    card.addEventListener('mouseleave', () => {
+      if (!enabled) return;
+      useBadge.style.display = 'none';
+      if (selectedEngine === engine) return;
+      card.style.borderColor = '';
+      card.style.boxShadow = '';
+      card.style.transform = '';
+    });
+
+    const img = document.createElement('img');
+    img.src = engine.logo;
+    img.alt = engine.title;
+    img.className = 'size-12';
+    // Stop the Pinterest browser extension from injecting its "Save" hover button.
+    img.setAttribute('nopin', 'nopin');
+    img.setAttribute('data-pin-nopin', 'true');
+    card.appendChild(useBadge);
+    card.appendChild(img);
+
+    const label = document.createElement('span');
+    label.className = 'font-semibold';
+    label.textContent = engine.title;
+    card.appendChild(label);
+
+    card.addEventListener('click', () => {
+      if (!enabled) return;
+      selectedEngine = engine;
+      cards.forEach(c => {
+        c.style.borderColor = '';
+        c.style.boxShadow = '';
+        c.style.transform = '';
+      });
+      card.style.borderColor = 'var(--color-primary, #3b82f6)';
+      card.style.boxShadow = '0 4px 12px rgba(0,0,0,.15)';
+      card.style.transform = 'translateY(-2px)';
+      const isSqlite = engine.key === 'sqlite';
+      input.style.display = '';
+      input.disabled = false;
+      input.placeholder = isSqlite
+        ? 'Enter the path to a SQLite file, e.g. C:\\data\\chinook.db'
+        : (CS_EXAMPLES[engine.key] || 'Enter a connection string');
+      connectBtn.disabled = input.value.trim() === '';
+      input.focus();
+    });
+
+    cards.push(card);
+    grid.appendChild(card);
+  });
+
+  wrap.appendChild(grid);
+
+  const form = document.createElement('div');
+  form.className = 'flex items-center gap-2';
+
+  input.addEventListener('input', () => {
+    connectBtn.disabled = input.disabled || input.value.trim() === '';
+  });
+
+  const doConnect = () => {
+    const value = input.value.trim();
+    if (!value) return;
+    // SQLite: turn a raw file path into a Data Source connection string.
+    let csValue = value;
+    if (selectedEngine && selectedEngine.key === 'sqlite' && !/data source=/i.test(value)) {
+      csValue = 'Data Source=' + value + ';';
+    }
+    const cs = document.getElementById('cs');
+    if (cs) cs.value = csValue;
+    updateEngineBranding(csValue);
+    connect();
+  };
+  connectBtn.addEventListener('click', doConnect);
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !connectBtn.disabled) doConnect(); });
+
+  form.appendChild(input);
+  form.appendChild(connectBtn);
+  wrap.appendChild(form);
+
+  host.appendChild(wrap);
+  refreshIcons();
+}
+
 // Mounts the <view-details> web component for the selected view.
 function showViewDetails(db, view) {
   const placeholder = document.getElementById('placeholder');
@@ -740,18 +1114,37 @@ window.addEventListener('DOMContentLoaded', async () => {
   initSidebarResize();
   initSidebarToggle();
   refreshIcons();
-  const savedCs = localStorage.getItem('connection-string');
+  // Restore saved tabs (engine profiles). The active tab's connection string
+  // drives the initial connection and branding.
+  loadTabs();
+  const at = activeTab();
+  const savedCs = at && at.cs;
   if (savedCs) {
+    CS = savedCs;
     document.getElementById('cs').value = savedCs;
     updateEngineBranding(savedCs);
     connect();
     return;
   }
-  const res = await fetch('/api/config');
-  const data = await res.json();
+  // No stored connection: render the tab strip and fall back to the default
+  // connection string from the server config, if any.
+  renderTabs();
+  if (at && at.type === 'connection') { applyContext(null); return; }
+  beginPending();
+  let data;
+  try {
+    const res = await fetch('/api/config');
+    data = await res.json();
+  } finally {
+    endPending();
+  }
   if (data.connectionString) {
+    CS = data.connectionString;
     document.getElementById('cs').value = data.connectionString;
     updateEngineBranding(data.connectionString);
+    connect();
+  } else {
+    applyContext(at ? at.context : null);
   }
 });
 
@@ -880,8 +1273,17 @@ function settingsTree() {
   tableStateKeys.forEach(k => tableSet.add(k.slice('sql-explorer-tablestate:'.length)));
   tableSqlKeys.forEach(k => { const m = k.match(/^sql-tab:([^:]*):t:(.+)$/); if (m) tableSet.add(m[1] + '.' + m[2]); });
 
+  // Total open tabs across all engine profiles.
+  const profileTabCount = (() => {
+    try {
+      const o = JSON.parse(localStorage.getItem('sql-explorer-profiles') || 'null');
+      if (!o || !Array.isArray(o.profiles)) return 0;
+      return o.profiles.reduce((n, p) => n + ((p.tabs && p.tabs.length) || 0), 0);
+    } catch (e) { return 0; }
+  })();
+
   return {
-    id: 'tabs', label: 'Open tabs', count: objLen('sql-explorer-tabs', 'tabs'),
+    id: 'tabs', label: 'Open tabs', count: profileTabCount,
     children: [
       {
         id: 'database', label: 'Database', count: dbSet.size,
@@ -925,47 +1327,287 @@ function settingsGuardableIds(node) {
   return out;
 }
 
-// Renders the "Settings" tab: an indented tree with a checkbox + item count per
-// line. Checked = the category is saved; unchecking stops it being saved.
+// Renders the "Settings" tab as a drill-down of saved engine profiles:
+//   Engine (n tabs)
+//     └ database name
+//         ├ Tables (n)
+//         │   └ schema.table
+//         │       ├ Data / Structure / Relations / SQL (whichever are saved)
+//         ├ SQL         (db-level SQL editor, if saved)
+//         └ Relations   (db relations diagram, if saved)
+function engineTitle(key) {
+  const e = DB_ENGINES.find(x => x.key === key);
+  return e ? e.title : (key || 'Unknown');
+}
+
+// Tables (schema.table) under a database that have any saved tab state, each
+// with the list of saved sub-tabs (Data / Structure / Relations / SQL).
+function settingsTableNodes(db) {
+  const map = {};
+  const ensure = (st) => (map[st] = map[st] || { tabs: [], keys: {} });
+  const statePrefix = 'sql-explorer-tablestate:' + db + '.';
+  const sqlPrefix = 'sql-tab:' + db + ':t:';
+  Object.keys(localStorage).forEach(k => {
+    if (k.startsWith(statePrefix)) {
+      const st = k.slice(statePrefix.length);
+      const node = ensure(st);
+      try {
+        const s = JSON.parse(localStorage.getItem(k) || '{}');
+        const hasData = (s.hidden && s.hidden.length) || (s.filters && Object.keys(s.filters).length) ||
+          s.sortCol || s.search || s.fuzzy || s.caseSensitive ||
+          (s.jsonCollapsed && s.jsonCollapsed.length) || s.jsonSearch;
+        const hasStruct = (s.structFilters && Object.keys(s.structFilters).length) || s.structSortCol;
+        if (hasData && !node.tabs.includes('Data')) node.tabs.push('Data');
+        if (hasStruct && !node.tabs.includes('Structure')) node.tabs.push('Structure');
+        // Data + Structure share the single tablestate key.
+        node.keys.Data = k;
+        node.keys.Structure = k;
+      } catch (e) { /* ignore */ }
+    } else if (k.startsWith(sqlPrefix) && !k.endsWith(':result')) {
+      const st = k.slice(sqlPrefix.length);
+      const node = ensure(st);
+      if (!node.tabs.includes('SQL')) node.tabs.push('SQL');
+      node.keys.SQL = k;
+    }
+  });
+  const order = ['Data', 'Structure', 'Relations', 'SQL'];
+  return Object.keys(map).sort().map(st => {
+    const node = map[st];
+    // All storage keys backing this table (dedup shared tablestate key).
+    const allKeys = [...new Set(Object.values(node.keys))];
+    const resultKey = node.keys.SQL ? node.keys.SQL + ':result' : null;
+    if (resultKey && localStorage.getItem(resultKey) != null) allKeys.push(resultKey);
+    return {
+      label: st,
+      keys: allKeys,
+      children: node.tabs
+        .sort((a, b) => order.indexOf(a) - order.indexOf(b))
+        .map(t => {
+          const k = [node.keys[t]].filter(Boolean);
+          if (t === 'SQL' && resultKey && localStorage.getItem(resultKey) != null) k.push(resultKey);
+          return { label: t, keys: k };
+        }),
+    };
+  });
+}
+
+// The db-level saved items shown under a tab's database name.
+function settingsDbChildren(db) {
+  const out = [];
+  const tableNodes = settingsTableNodes(db);
+  if (tableNodes.length) {
+    const tableKeys = tableNodes.reduce((acc, n) => acc.concat(n.keys), []);
+    out.push({ label: 'Tables', count: tableNodes.length, keys: tableKeys, children: tableNodes });
+  }
+  const dbSqlKey = 'sql-tab:' + db + ':db';
+  if (localStorage.getItem(dbSqlKey)) {
+    const keys = [dbSqlKey];
+    if (localStorage.getItem(dbSqlKey + ':result') != null) keys.push(dbSqlKey + ':result');
+    out.push({ label: 'SQL', keys });
+  }
+  const dbTablesKey = 'sql-explorer-dbtables:' + db;
+  if (localStorage.getItem(dbTablesKey)) out.push({ label: 'Tables list', keys: [dbTablesKey] });
+  try {
+    const rel = JSON.parse(localStorage.getItem('sql-explorer-relstate') || 'null');
+    // Relations live in a shared object keyed by db; deletion prunes just this db.
+    if (rel && rel[db]) out.push({ label: 'Relations', relDb: db });
+  } catch (e) { /* ignore */ }
+  return out;
+}
+
+// Builds the top-level list of engine profiles with their tabs.
+function settingsProfilesTree() {
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem('sql-explorer-profiles') || 'null'); } catch (e) { saved = null; }
+  const profiles = (saved && Array.isArray(saved.profiles)) ? saved.profiles : [];
+  return profiles.map(p => ({
+    label: engineTitle(p.engine),
+    count: (p.tabs || []).length,
+    profileEngine: p.engine,
+    children: (p.tabs || []).map(t => {
+      const db = (t.context && t.context.db) || null;
+      return { label: db || 'Server', dbName: db, tabId: t.id, profileEngine: p.engine, children: db ? settingsDbChildren(db) : [] };
+    }),
+  }));
+}
+
+// Recursively builds a node element. Nodes with children are collapsible
+// (<details>); leaves are a simple indented row.
+function settingsNodeEl(node, depth) {
+  const pad = (depth * 1.25 + 0.5) + 'rem';
+  const hasChildren = node.children && node.children.length;
+  const text = node.label + (node.count != null ? ' (' + node.count + ')' : '');
+
+  // Red X delete button shown on every row.
+  const del = document.createElement('button');
+  del.type = 'button';
+  del.className = 'ml-auto opacity-50 hover:opacity-100 transition-colors';
+  del.title = 'Delete';
+  del.appendChild(icon('x'));
+  del.addEventListener('mouseenter', () => { del.style.color = '#ef4444'; });
+  del.addEventListener('mouseleave', () => { del.style.color = ''; });
+  del.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    confirmDeleteSettingsNode(node);
+  });
+
+  if (!hasChildren) {
+    const row = document.createElement('div');
+    row.className = 'flex items-center gap-2 py-1 text-sm rounded hover:bg-base-200 pr-2';
+    row.style.paddingLeft = pad;
+    row.appendChild(icon('dot', 'opacity-60'));
+    const span = document.createElement('span');
+    span.textContent = text;
+    row.appendChild(span);
+    row.appendChild(del);
+    return row;
+  }
+
+  const details = document.createElement('details');
+  details.open = true;
+  const summary = document.createElement('summary');
+  summary.className = 'flex items-center gap-2 py-1 cursor-pointer select-none text-sm font-semibold rounded hover:bg-base-200 pr-2';
+  summary.style.paddingLeft = pad;
+  summary.style.listStyle = 'none';
+  const chev = icon('chevron-right', 'transition-transform');
+  chev.style.transform = 'rotate(90deg)';
+  summary.appendChild(chev);
+  const span = document.createElement('span');
+  span.textContent = text;
+  summary.appendChild(span);
+  summary.appendChild(del);
+  details.appendChild(summary);
+  details.addEventListener('toggle', () => {
+    chev.style.transform = details.open ? 'rotate(90deg)' : '';
+  });
+  node.children.forEach(c => details.appendChild(settingsNodeEl(c, depth + 1)));
+  return details;
+}
+
+// Counts the descendant leaf entries (sub-entries) under a node for the
+// confirmation message.
+function countSettingsSubentries(node) {
+  if (!node.children || !node.children.length) return 0;
+  let n = 0;
+  node.children.forEach(c => { n += 1 + countSettingsSubentries(c); });
+  return n;
+}
+
+// Deletes every localStorage entry a settings node represents, including the
+// engine profile, per-tab, per-db and per-table state it owns.
+function deleteSettingsNode(node) {
+  // Direct storage keys attached to the node.
+  (node.keys || []).forEach(k => { try { localStorage.removeItem(k); } catch (e) { /* ignore */ } });
+
+  // Relations node prunes just this db from the shared relstate object.
+  if (node.relDb) {
+    try {
+      const rel = JSON.parse(localStorage.getItem('sql-explorer-relstate') || 'null');
+      if (rel && rel[node.relDb]) { delete rel[node.relDb]; localStorage.setItem('sql-explorer-relstate', JSON.stringify(rel)); }
+    } catch (e) { /* ignore */ }
+  }
+
+  // Removing an engine profile drops all its tabs from the profiles store.
+  if (node.profileEngine && node.tabId == null && node.dbName === undefined) {
+    removeProfileFromStore(node.profileEngine);
+  }
+
+  // Removing a tab (the db-name row) drops that single tab.
+  if (node.tabId != null) {
+    removeTabFromStore(node.tabId);
+  }
+
+  // Recurse into children so their keys are cleaned up too.
+  (node.children || []).forEach(deleteSettingsNode);
+}
+
+// Removes an entire engine profile (and its tabs) from sql-explorer-profiles.
+function removeProfileFromStore(engine) {
+  tabs = tabs.filter(t => (t.cs ? detectEngine(t.cs).key : 'new') !== engine);
+  if (!tabs.length) tabs = [{ id: ++tabSeq, cs: '', context: null, type: null }];
+  if (!tabs.some(t => t.id === activeTabId)) activeTabId = tabs[0].id;
+  saveTabs();
+}
+
+// Removes a single tab by id from the runtime tabs and persisted profiles.
+function removeTabFromStore(id) {
+  tabs = tabs.filter(t => t.id !== id);
+  if (!tabs.length) tabs = [{ id: ++tabSeq, cs: '', context: null, type: null }];
+  if (!tabs.some(t => t.id === activeTabId)) activeTabId = tabs[0].id;
+  saveTabs();
+}
+
+// Opens the confirm dialog for deleting a settings node, listing how many
+// sub-entries will be removed along with it.
+function confirmDeleteSettingsNode(node) {
+  const modal = document.getElementById('confirm-modal');
+  const msg = document.getElementById('confirm-message');
+  const yes = document.getElementById('confirm-yes');
+  const no = document.getElementById('confirm-no');
+  if (!modal || !msg || !yes || !no) return;
+
+  const subCount = countSettingsSubentries(node);
+  msg.textContent = 'Delete "' + node.label + '"?' +
+    (subCount > 0 ? ' This will also remove ' + subCount + ' sub-entr' + (subCount === 1 ? 'y' : 'ies') + '.' : '');
+
+  const onYes = () => {
+    deleteSettingsNode(node);
+    cleanup();
+    modal.close();
+    renderSettingsMain();
+    renderSettingsJson();
+    renderTabs();
+  };
+  const onNo = () => { cleanup(); modal.close(); };
+  function cleanup() {
+    yes.removeEventListener('click', onYes);
+    no.removeEventListener('click', onNo);
+  }
+  yes.addEventListener('click', onYes);
+  no.addEventListener('click', onNo);
+  modal.showModal();
+  refreshIcons();
+}
+
+// Renders the "Settings" tab: a drill-down tree of saved engine profiles.
 function renderSettingsMain() {
   const host = document.getElementById('settings-main');
   if (!host) return;
   host.innerHTML = '';
-  const disabled = saveDisabledSet();
-  const rows = [];
-  const walk = (node, depth) => { rows.push({ node, depth }); (node.children || []).forEach(c => walk(c, depth + 1)); };
-  walk(settingsTree(), 0);
+  const profiles = settingsProfilesTree();
+  if (!profiles.length) {
+    const empty = document.createElement('p');
+    empty.className = 'text-base-content/60 text-sm';
+    empty.textContent = 'No saved profiles yet.';
+    host.appendChild(empty);
+    return;
+  }
 
-  rows.forEach(({ node, depth }) => {
-    const line = document.createElement('label');
-    line.className = 'label flex w-full cursor-pointer justify-start gap-2';
-    line.style.paddingLeft = (depth * 1.5) + 'rem';
-
-    const ids = settingsGuardableIds(node);
-    const off = ids.filter(id => disabled.has(id)).length;
-    const cb = document.createElement('input');
-    cb.type = 'checkbox';
-    cb.className = 'checkbox checkbox-sm';
-    cb.checked = off === 0;
-    cb.indeterminate = off > 0 && off < ids.length;
-    cb.addEventListener('change', () => {
-      const set = saveDisabledSet();
-      ids.forEach(id => { if (cb.checked) set.delete(id); else set.add(id); });
-      persistSaveDisabled(set);
-      renderSettingsMain();
-    });
-
-    const span = document.createElement('span');
-    span.className = 'label-text';
-    span.append(node.label + ' : ');
-    const n = document.createElement('span');
-    n.className = 'font-mono font-bold';
-    n.textContent = String(node.count);
-    span.appendChild(n);
-
-    line.append(cb, span);
-    host.appendChild(line);
+  // Toolbar with an expand/collapse-all toggle.
+  const toolbar = document.createElement('div');
+  toolbar.className = 'flex justify-end mb-1';
+  const toggleAll = document.createElement('button');
+  toggleAll.type = 'button';
+  toggleAll.className = 'btn btn-ghost btn-xs gap-1';
+  const setToggleLabel = (collapse) => {
+    toggleAll.innerHTML = '';
+    toggleAll.appendChild(icon(collapse ? 'chevrons-down-up' : 'chevrons-up-down'));
+    toggleAll.appendChild(document.createTextNode(collapse ? 'Collapse all' : 'Expand all'));
+    refreshIcons();
+  };
+  setToggleLabel(true);
+  toggleAll.addEventListener('click', () => {
+    const items = host.querySelectorAll('details');
+    const anyOpen = [...items].some(d => d.open);
+    items.forEach(d => { d.open = !anyOpen; });
+    setToggleLabel(!anyOpen);
   });
+  toolbar.appendChild(toggleAll);
+  host.appendChild(toolbar);
+
+  profiles.forEach(p => host.appendChild(settingsNodeEl(p, 0)));
+  refreshIcons();
 }
 
 // Aggregates all localStorage entries, parsing JSON values where possible.
@@ -1146,12 +1788,30 @@ function importSettingsData(text) {
   renderSettingsJson();
 }
 
+// Tracks in-flight operations so a global loading indicator stays visible for
+// as long as any request is pending.
+let pendingCount = 0;
+function updateLoadingIndicator() {
+  const el = document.getElementById('global-loading');
+  if (!el) return;
+  const active = pendingCount > 0;
+  el.classList.toggle('hidden', !active);
+  el.classList.toggle('flex', active);
+}
+function beginPending() { pendingCount++; updateLoadingIndicator(); }
+function endPending() { pendingCount = Math.max(0, pendingCount - 1); updateLoadingIndicator(); }
+
 async function api(path, body) {
-  const res = await fetch('/api/' + path, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body)
-  });
-  return res.json();
+  beginPending();
+  try {
+    const res = await fetch('/api/' + path, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    return res.json();
+  } finally {
+    endPending();
+  }
 }
 
 // Maps a connection string to a database engine so the header logo/title can
@@ -1181,6 +1841,13 @@ function updateEngineBranding(cs) {
 
 async function connect() {
   CS = document.getElementById('cs').value;
+  // Bind this connection string to the active tab and, if it was a "New
+  // connection" tab, turn it into a normal database tab.
+  const at = activeTab();
+  if (at) {
+    at.cs = CS;
+    if (at.type === 'connection') at.type = null;
+  }
   updateEngineBranding(CS);
   const status = document.getElementById('status');
   const tree = document.getElementById('tree');
@@ -1189,14 +1856,13 @@ async function connect() {
   navHistory = []; navIndex = -1; updateNavButtons();
   const data = await api('connect', { connectionString: CS });
   if (!data.ok) { status.innerHTML = '<div role="alert" class="alert alert-error alert-soft">' + data.error + '</div>'; return; }
-  localStorage.setItem('connection-string', CS);
   totalDbs = data.databases.length;
   renderInfo();
   data.databases.forEach(db => tree.appendChild(dbNode(db)));
   refreshIcons();
-  loadTabs();
+  saveTabs();
   renderTabs();
-  await applyContext(activeTab() ? activeTab().context : null);
+  await applyContext(at ? at.context : null);
   loadDbStats();
 }
 
@@ -1225,6 +1891,13 @@ function saveContext() {
 // target database's objects first so the selected table/view/object resolves.
 async function applyContext(saved) {
   currentDb = null; currentTable = null;
+  // Connection tabs render the engine picker instead of a database view.
+  const tab = activeTab();
+  if (tab && tab.type === 'connection') {
+    renderCrumbs(); renderInfo(); clearTableDetails(); highlightDb(null); updateNavButtons();
+    renderConnectionPicker();
+    return;
+  }
   if (!saved || !saved.db) {
     renderCrumbs(); renderInfo(); clearTableDetails(); highlightDb(null); updateNavButtons();
     renderServerHome();
