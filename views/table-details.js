@@ -25,6 +25,9 @@ class TableDetails extends HTMLElement {
     this._structColFilters = {};
     this._structSortCol = null;
     this._structSortDir = 1;
+    this._editMeta = null;
+    this._selectedKeys = new Set();
+    this._lastCheckedIndex = null;
     this._uid = 'td-' + Math.random().toString(36).slice(2);
   }
 
@@ -74,6 +77,7 @@ class TableDetails extends HTMLElement {
     if (this._relSim) { this._relSim.stop(); this._relSim = null; }
     if (this._sqlCtrl) { this._sqlCtrl.destroy(); this._sqlCtrl = null; }
     this._sqlTab = false;
+    this.closeRowContextMenu();
     this.closeNodeOverlay();
   }
 
@@ -90,6 +94,7 @@ class TableDetails extends HTMLElement {
     this._structColFilters = {};
     this._structSortCol = null;
     this._structSortDir = 1;
+    this._editMeta = null;
     if (this._sqlCtrl) { this._sqlCtrl.destroy(); this._sqlCtrl = null; }
     this._sqlTab = false;
     this.renderShell();
@@ -203,6 +208,7 @@ class TableDetails extends HTMLElement {
         const label = input.getAttribute('aria-label');
         localStorage.setItem('table-tab', label);
         if (label === 'SQL') this.loadSqlTab();
+        requestAnimationFrame(() => window.pinScrollAreas(this));
       });
     });
     if (active === 'SQL') this.loadSqlTab();
@@ -376,6 +382,10 @@ class TableDetails extends HTMLElement {
 
     const results = document.createElement('div');
     results.setAttribute('data-results', '');
+    results.setAttribute('data-pin', '');
+    results.style.display = 'flex';
+    results.style.flexDirection = 'column';
+    results.style.minHeight = '0';
     target.appendChild(results);
   }
 
@@ -386,6 +396,8 @@ class TableDetails extends HTMLElement {
   async loadData() {
     const target = this.results();
     if (!target) return;
+    this.loadSelection();
+    this._lastCheckedIndex = null;
     this.info(target, 'Loading data…');
     const d = await this.api('data', {
       connectionString: this.cs,
@@ -447,14 +459,16 @@ class TableDetails extends HTMLElement {
 
     const visible = d.columns.filter(c => !this.hiddenColumns.has(c));
 
-    target.appendChild(this.pagination(d, 'top'));
+    const top = this.pagination(d, 'top'); top.classList.add('shrink-0');
+    target.appendChild(top);
     if (this.dataView === 'json') {
       this.renderJson(target, d, visible);
     } else {
       this.renderTable(target, d, visible);
     }
-
-    target.appendChild(this.pagination(d, 'bottom'));
+    const bottom = this.pagination(d, 'bottom'); bottom.classList.add('shrink-0');
+    target.appendChild(bottom);
+    window.pinScrollAreas(this);
   }
 
   // Re-renders only the results body (table/JSON + pagination) using the last
@@ -474,24 +488,46 @@ class TableDetails extends HTMLElement {
     }
 
     const visible = d.columns.filter(c => !this.hiddenColumns.has(c));
-    target.appendChild(this.pagination(d, 'top'));
+    const top = this.pagination(d, 'top'); top.classList.add('shrink-0');
+    target.appendChild(top);
     if (this.dataView === 'json') {
       this.renderJson(target, d, visible);
     } else {
       this.renderTable(target, d, visible);
     }
-    target.appendChild(this.pagination(d, 'bottom'));
+    const bottom = this.pagination(d, 'bottom'); bottom.classList.add('shrink-0');
+    target.appendChild(bottom);
+    window.pinScrollAreas(this);
   }
 
   renderTable(target, d, visible) {
     const wrap = document.createElement('div');
-    wrap.className = 'overflow-x-auto';
+    wrap.className = 'overflow-auto min-h-0 flex-1';
     if (Object.values(this._colFilters).some(v => v)) wrap.classList.add('filter-active-border');
     const table = document.createElement('table');
     table.className = 'table table-zebra table-sm';
 
     const thead = document.createElement('thead');
+    thead.className = 'sticky top-0 z-10 bg-base-100';
     const htr = document.createElement('tr');
+    // Leading selection column: a "select all rows on this page" checkbox.
+    const selTh = document.createElement('th');
+    selTh.className = 'w-8';
+    const selAll = document.createElement('input');
+    selAll.type = 'checkbox';
+    selAll.className = 'checkbox checkbox-sm';
+    selAll.title = 'Select all rows on this page (for deletion)';
+    selAll.addEventListener('change', () => {
+      d.rows.forEach(r => {
+        const k = this.rowKey(r);
+        if (selAll.checked) this._selectedKeys.add(k); else this._selectedKeys.delete(k);
+      });
+      this.saveSelection();
+      tbody.querySelectorAll('input.row-select').forEach((cb) => { cb.checked = selAll.checked; });
+      this.updateClearSelectionButtons();
+    });
+    selTh.appendChild(selAll);
+    htr.appendChild(selTh);
     visible.forEach(c => {
       const th = document.createElement('th');
       this.renderHeaderLabel(th, c);
@@ -501,20 +537,446 @@ class TableDetails extends HTMLElement {
     table.appendChild(thead);
 
     const tbody = document.createElement('tbody');
-    d.rows.forEach(row => {
+    const rowChecks = [];
+    const allSelected = () => d.rows.every(r => this._selectedKeys.has(this.rowKey(r)));
+    d.rows.forEach((row, i) => {
+      const key = this.rowKey(row);
       const tr = document.createElement('tr');
+      const selTd = document.createElement('td');
+      selTd.className = 'w-8';
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.className = 'checkbox checkbox-sm row-select';
+      cb.checked = this._selectedKeys.has(key);
+      cb.addEventListener('change', () => {
+        if (cb.checked) this._selectedKeys.add(key); else this._selectedKeys.delete(key);
+        this.saveSelection();
+        selAll.checked = allSelected();
+        this.updateClearSelectionButtons();
+      });
+      // Shift-click selects the range between the last-clicked checkbox and this one.
+      cb.addEventListener('click', (e) => {
+        if (e.shiftKey && this._lastCheckedIndex != null && this._lastCheckedIndex !== i) {
+          const lo = Math.min(this._lastCheckedIndex, i);
+          const hi = Math.max(this._lastCheckedIndex, i);
+          for (let k = lo; k <= hi; k++) {
+            const rc = rowChecks[k];
+            if (!rc) continue;
+            rc.cb.checked = cb.checked;
+            if (cb.checked) this._selectedKeys.add(rc.key); else this._selectedKeys.delete(rc.key);
+          }
+          this.saveSelection();
+          selAll.checked = allSelected();
+          this.updateClearSelectionButtons();
+        }
+        this._lastCheckedIndex = i;
+      });
+      rowChecks.push({ cb, row, key });
+      selTd.appendChild(cb);
+      tr.appendChild(selTd);
+      // Right-clicking a row selects it (if not already) and opens the menu.
+      tr.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        if (!this._selectedKeys.has(key)) {
+          this._selectedKeys.add(key);
+          this.saveSelection();
+          cb.checked = true;
+          selAll.checked = allSelected();
+          this.updateClearSelectionButtons();
+        }
+        this.showRowContextMenu(e, row);
+      });
       visible.forEach(c => {
         const td = document.createElement('td');
         td.className = 'max-w-xs break-words whitespace-normal';
         const v = row[c];
         this.highlightInto(td, v === null || v === undefined ? '' : String(v));
+        td.addEventListener('dblclick', () => this.beginCellEdit(td, row, c));
         tr.appendChild(td);
       });
       tbody.appendChild(tr);
     });
+    selAll.checked = d.rows.length > 0 && allSelected();
     table.appendChild(tbody);
     wrap.appendChild(table);
     target.appendChild(wrap);
+    if (window.enableCellCrosshair) window.enableCellCrosshair(table);
+  }
+
+  // Quotes a SQL Server / SQLite identifier by wrapping it in [ ] and escaping
+  // any embedded closing bracket.
+  _qid(name) { return '[' + String(name).replace(/]/g, ']]') + ']'; }
+
+  // Formats a JS value as a SQL literal for the given column type.
+  _sqlLiteral(value, sqlType) {
+    if (value === null || value === undefined || value === '') return 'NULL';
+    const t = String(sqlType || '').toLowerCase();
+    if (t === 'bit') return (value === '0' || value === 0 || value === false) ? '0' : '1';
+    const numeric = ['int', 'bigint', 'smallint', 'tinyint', 'decimal', 'numeric',
+      'float', 'real', 'money', 'smallmoney'];
+    if (numeric.includes(t) && value !== '' && !isNaN(Number(value))) return String(Number(value));
+    return "'" + String(value).replace(/'/g, "''") + "'";
+  }
+
+  // Loads (and caches) the column type + primary-key metadata used to build a
+  // single-cell UPDATE statement.
+  async ensureEditMeta() {
+    if (this._editMeta) return this._editMeta;
+    const colByName = {};
+    try {
+      const d = await this.api('edit-meta', {
+        connectionString: this.cs, database: this.database,
+        schema: this.schema, table: this.table,
+      });
+      if (d.ok) (d.columns || []).forEach(c => { colByName[c.name] = c; });
+    } catch (e) { /* fall back to no metadata */ }
+    this._editMeta = { colByName };
+    return this._editMeta;
+  }
+
+  // Builds an UPDATE for a single edited cell. The WHERE clause uses the table's
+  // primary-key columns when known, otherwise every original column value.
+  async buildCellUpdateSql(row, col, newVal) {
+    const { colByName } = await this.ensureEditMeta();
+    const pkCols = Object.values(colByName).filter(c => c.isPrimaryKey).map(c => c.name);
+    const whereCols = (pkCols.length ? pkCols : Object.keys(row)).filter(wc => wc in row);
+    const setVal = newVal === '' ? null : newVal;
+    const setClause = this._qid(col) + ' = ' + this._sqlLiteral(setVal, (colByName[col] || {}).type);
+    const whereClause = whereCols.map(wc => {
+      const wv = row[wc];
+      if (wv === null || wv === undefined) return this._qid(wc) + ' IS NULL';
+      return this._qid(wc) + ' = ' + this._sqlLiteral(wv, (colByName[wc] || {}).type);
+    }).join(' AND ');
+    return 'UPDATE ' + this._qid(this.schema) + '.' + this._qid(this.table) +
+      ' SET ' + setClause + ' WHERE ' + whereClause + ';';
+  }
+
+  // Turns a data cell into an inline editor: a text input flanked by a green
+  // confirm (Enter) and a red cancel (Esc) button. Confirm persists the change
+  // with an UPDATE; cancel restores the original value.
+  beginCellEdit(td, row, col) {
+    if (td._editing) return;
+    td._editing = true;
+    const original = row[col] === null || row[col] === undefined ? '' : String(row[col]);
+
+    td.innerHTML = '';
+    const wrap = document.createElement('div');
+    wrap.className = 'flex items-center gap-1';
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'input input-xs input-bordered grow min-w-24';
+    input.value = original;
+    const ok = document.createElement('button');
+    ok.type = 'button';
+    ok.className = 'btn btn-xs btn-square btn-success';
+    ok.title = 'Confirm (Enter)';
+    ok.innerHTML = '<i data-lucide="check" class="size-3"></i>';
+    const cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.className = 'btn btn-xs btn-square btn-error';
+    cancel.title = 'Cancel (Esc)';
+    cancel.innerHTML = '<i data-lucide="x" class="size-3"></i>';
+
+    const restore = (text) => { td._editing = false; this.highlightInto(td, text); };
+    const doCancel = () => restore(original);
+    const doCommit = async () => {
+      const newVal = input.value;
+      if (newVal === original) { doCancel(); return; }
+      ok.disabled = cancel.disabled = input.disabled = true;
+      try {
+        const sql = await this.buildCellUpdateSql(row, col, newVal);
+        const res = await this.api('query', { connectionString: this.cs, database: this.database, sql });
+        if (!res.ok) throw new Error(res.error || 'Update failed');
+        const affected = Array.isArray(res.rowsAffected) ? res.rowsAffected.reduce((a, b) => a + b, 0) : null;
+        if (affected === 0) throw new Error('No rows matched (table needs a primary key).');
+        row[col] = newVal === '' ? null : newVal;
+        restore(newVal);
+      } catch (e) {
+        ok.disabled = cancel.disabled = input.disabled = false;
+        input.classList.add('input-error');
+        input.title = (e && e.message) || 'Update failed';
+        input.focus();
+      }
+    };
+
+    ok.addEventListener('click', doCommit);
+    cancel.addEventListener('click', doCancel);
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); doCommit(); }
+      else if (e.key === 'Escape') { e.preventDefault(); doCancel(); }
+    });
+
+    wrap.append(input, ok, cancel);
+    td.appendChild(wrap);
+    if (window.lucide) window.lucide.createIcons({ root: wrap });
+    input.focus();
+    input.select();
+  }
+
+  // Stable identity for a row, used to persist the selection across reloads.
+  rowKey(row) { return JSON.stringify(row); }
+  rowFromKey(key) { try { return JSON.parse(key); } catch (e) { return null; } }
+
+  selectionStorageKey() {
+    return 'sql-explorer-selection:' + this.database + '.' + this.schema + '.' + this.table;
+  }
+
+  loadSelection() {
+    try {
+      const raw = localStorage.getItem(this.selectionStorageKey());
+      const arr = raw ? JSON.parse(raw) : [];
+      this._selectedKeys = new Set(Array.isArray(arr) ? arr : []);
+    } catch (e) { this._selectedKeys = new Set(); }
+  }
+
+  saveSelection() {
+    try { localStorage.setItem(this.selectionStorageKey(), JSON.stringify([...this._selectedKeys])); } catch (e) { /* ignore */ }
+  }
+
+  // Shows/hides the pagination "Clear selections" buttons based on the current
+  // selection so they track checkbox changes without a full re-render.
+  updateClearSelectionButtons() {
+    const on = !!(this._selectedKeys && this._selectedKeys.size);
+    const panel = this.panel('data');
+    if (!panel) return;
+    panel.querySelectorAll('[data-clear-sel]').forEach(btn => btn.classList.toggle('hidden', !on));
+  }
+
+  // Floating right-click menu for a row: Edit (open the row in a modal) and
+  // Delete (confirm, then remove the selected rows or this row).
+  showRowContextMenu(evt, row) {
+    this.closeRowContextMenu();
+    const menu = document.createElement('ul');
+    menu.className = 'menu menu-sm bg-base-100 rounded-box shadow-lg border border-base-300 absolute z-50 w-40';
+    menu.style.top = evt.clientY + 'px';
+    menu.style.left = evt.clientX + 'px';
+
+    const item = (iconName, label, onClick, cls, disabled) => {
+      const li = document.createElement('li');
+      const a = document.createElement('a');
+      a.className = (cls ? cls + ' ' : '') + (disabled ? 'menu-disabled opacity-50 pointer-events-none' : '');
+      a.innerHTML = '<i data-lucide="' + iconName + '" class="size-4"></i>' + label;
+      if (!disabled) a.addEventListener('click', () => { this.closeRowContextMenu(); onClick(); });
+      li.appendChild(a);
+      return li;
+    };
+
+    const selectedKeys = [...this._selectedKeys];
+    const multi = selectedKeys.length > 1;
+    // Editing targets a single row, so it's disabled when several are selected.
+    menu.appendChild(item('pencil', 'Edit', () => this.openRowEditModal(row), null, multi));
+    // Delete acts on all selected rows (reconstructed from their stored keys),
+    // or just this row when nothing is selected.
+    const delRows = selectedKeys.length ? selectedKeys.map(k => this.rowFromKey(k)).filter(Boolean) : [row];
+    const delLabel = multi ? 'Delete selected rows' : 'Delete';
+    menu.appendChild(item('trash', delLabel, () => this.openDeleteModal(delRows), 'text-error'));
+
+    document.body.appendChild(menu);
+    this._rowMenu = menu;
+    if (window.lucide) window.lucide.createIcons({ root: menu });
+
+    // Keep the menu within the viewport.
+    const r = menu.getBoundingClientRect();
+    if (r.right > window.innerWidth) menu.style.left = (window.innerWidth - r.width - 4) + 'px';
+    if (r.bottom > window.innerHeight) menu.style.top = (window.innerHeight - r.height - 4) + 'px';
+
+    this._onMenuDismiss = (e) => { if (!menu.contains(e.target)) this.closeRowContextMenu(); };
+    setTimeout(() => {
+      document.addEventListener('mousedown', this._onMenuDismiss);
+      document.addEventListener('keydown', this._onMenuKey = (e) => { if (e.key === 'Escape') this.closeRowContextMenu(); });
+    }, 0);
+  }
+
+  closeRowContextMenu() {
+    if (this._rowMenu) { this._rowMenu.remove(); this._rowMenu = null; }
+    if (this._onMenuDismiss) { document.removeEventListener('mousedown', this._onMenuDismiss); this._onMenuDismiss = null; }
+    if (this._onMenuKey) { document.removeEventListener('keydown', this._onMenuKey); this._onMenuKey = null; }
+  }
+
+  // Opens a modal to edit every column of a row; Save runs an UPDATE for the
+  // changed columns and reloads the data.
+  async openRowEditModal(row) {
+    const { colByName } = await this.ensureEditMeta();
+    const dialog = document.createElement('dialog');
+    dialog.className = 'modal';
+    const box = document.createElement('div');
+    box.className = 'modal-box max-w-2xl';
+    const title = document.createElement('h3');
+    title.className = 'text-lg font-bold mb-4';
+    title.textContent = 'Edit row — ' + this.table;
+    box.appendChild(title);
+
+    const form = document.createElement('div');
+    form.className = 'grid grid-cols-1 gap-3';
+    const inputs = {};
+    Object.keys(row).forEach(col => {
+      const meta = colByName[col];
+      const type = meta ? meta.type : '';
+      const field = document.createElement('label');
+      field.className = 'form-control w-full';
+      const lbl = document.createElement('div');
+      lbl.className = 'label py-1';
+      const lblText = document.createElement('span');
+      lblText.className = 'label-text font-medium';
+      lblText.textContent = col + (type ? ' (' + type + ')' : '') + (meta && meta.isPrimaryKey ? ' • PK' : '');
+      lbl.appendChild(lblText);
+      field.appendChild(lbl);
+      const inp = document.createElement('input');
+      inp.type = 'text';
+      inp.className = 'input input-bordered input-sm w-full';
+      inp.value = row[col] === null || row[col] === undefined ? '' : String(row[col]);
+      field.appendChild(inp);
+      inputs[col] = inp;
+      form.appendChild(field);
+    });
+    box.appendChild(form);
+
+    const errBox = document.createElement('div');
+    errBox.className = 'alert alert-error alert-soft mt-3 hidden';
+    box.appendChild(errBox);
+
+    const action = document.createElement('div');
+    action.className = 'modal-action';
+    const cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.className = 'btn';
+    cancel.textContent = 'Cancel';
+    cancel.addEventListener('click', () => dialog.close());
+    const save = document.createElement('button');
+    save.type = 'button';
+    save.className = 'btn btn-primary';
+    save.textContent = 'Save';
+    save.addEventListener('click', async () => {
+      const newValues = {};
+      Object.keys(inputs).forEach(col => { newValues[col] = inputs[col].value; });
+      const sql = await this.buildRowUpdateSql(row, newValues);
+      if (!sql) { dialog.close(); return; } // nothing changed
+      save.disabled = cancel.disabled = true;
+      const res = await this.api('query', { connectionString: this.cs, database: this.database, sql });
+      if (res.ok) {
+        Object.keys(inputs).forEach(col => { row[col] = inputs[col].value === '' ? null : inputs[col].value; });
+        dialog.close();
+        this.loadData();
+      } else {
+        save.disabled = cancel.disabled = false;
+        errBox.textContent = res.error || 'Update failed';
+        errBox.classList.remove('hidden');
+      }
+    });
+    action.append(cancel, save);
+    box.appendChild(action);
+
+    dialog.appendChild(box);
+    const backdrop = document.createElement('form');
+    backdrop.method = 'dialog';
+    backdrop.className = 'modal-backdrop';
+    backdrop.innerHTML = '<button>close</button>';
+    dialog.appendChild(backdrop);
+    document.body.appendChild(dialog);
+    dialog.addEventListener('close', () => dialog.remove());
+    dialog.showModal();
+  }
+
+  // Builds an UPDATE for the columns that actually changed. WHERE uses the
+  // primary key when known, otherwise every original column value.
+  async buildRowUpdateSql(row, newValues) {
+    const { colByName } = await this.ensureEditMeta();
+    const pkCols = Object.values(colByName).filter(c => c.isPrimaryKey).map(c => c.name);
+    const whereCols = (pkCols.length ? pkCols : Object.keys(row)).filter(wc => wc in row);
+    const orig = (v) => (v === null || v === undefined ? '' : String(v));
+    const changed = Object.keys(newValues).filter(c => orig(row[c]) !== newValues[c]);
+    if (!changed.length) return '';
+    const setClause = changed.map(c =>
+      this._qid(c) + ' = ' + this._sqlLiteral(newValues[c] === '' ? null : newValues[c], (colByName[c] || {}).type)
+    ).join(', ');
+    const whereClause = whereCols.map(wc => {
+      const wv = row[wc];
+      if (wv === null || wv === undefined) return this._qid(wc) + ' IS NULL';
+      return this._qid(wc) + ' = ' + this._sqlLiteral(wv, (colByName[wc] || {}).type);
+    }).join(' AND ');
+    return 'UPDATE ' + this._qid(this.schema) + '.' + this._qid(this.table) +
+      ' SET ' + setClause + ' WHERE ' + whereClause + ';';
+  }
+
+  // Builds one DELETE statement per row, matched by primary key (or all
+  // original column values when the table has no primary key).
+  async buildDeleteSql(rows) {
+    const { colByName } = await this.ensureEditMeta();
+    const pkCols = Object.values(colByName).filter(c => c.isPrimaryKey).map(c => c.name);
+    return rows.map(row => {
+      const whereCols = (pkCols.length ? pkCols : Object.keys(row)).filter(wc => wc in row);
+      const whereClause = whereCols.map(wc => {
+        const wv = row[wc];
+        if (wv === null || wv === undefined) return this._qid(wc) + ' IS NULL';
+        return this._qid(wc) + ' = ' + this._sqlLiteral(wv, (colByName[wc] || {}).type);
+      }).join(' AND ');
+      return 'DELETE FROM ' + this._qid(this.schema) + '.' + this._qid(this.table) + ' WHERE ' + whereClause + ';';
+    }).join('\n');
+  }
+
+  // Confirms deletion of the given rows, then runs the DELETE(s) and reloads.
+  async openDeleteModal(rows) {
+    if (!rows || !rows.length) return;
+    const sql = await this.buildDeleteSql(rows);
+    const dialog = document.createElement('dialog');
+    dialog.className = 'modal';
+    const box = document.createElement('div');
+    box.className = 'modal-box';
+    const title = document.createElement('h3');
+    title.className = 'text-lg font-bold text-error flex items-center gap-2';
+    title.innerHTML = '<i data-lucide="trash" class="size-5"></i>Delete ' + rows.length + (rows.length > 1 ? ' rows' : ' row');
+    box.appendChild(title);
+    const msg = document.createElement('p');
+    msg.className = 'py-4';
+    msg.textContent = 'This permanently deletes ' + rows.length + (rows.length > 1 ? ' rows' : ' row') +
+      ' from ' + this.table + '. This cannot be undone. Continue?';
+    box.appendChild(msg);
+    const pre = document.createElement('pre');
+    pre.className = 'rounded-lg bg-base-200 p-2 text-xs overflow-auto font-mono max-h-48';
+    pre.textContent = sql;
+    box.appendChild(pre);
+    const errBox = document.createElement('div');
+    errBox.className = 'alert alert-error alert-soft mt-3 hidden';
+    box.appendChild(errBox);
+
+    const action = document.createElement('div');
+    action.className = 'modal-action';
+    const cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.className = 'btn';
+    cancel.textContent = 'Cancel';
+    cancel.addEventListener('click', () => dialog.close());
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'btn btn-error';
+    del.innerHTML = '<i data-lucide="trash" class="size-4"></i>Delete';
+    del.addEventListener('click', async () => {
+      del.disabled = cancel.disabled = true;
+      const res = await this.api('query', { connectionString: this.cs, database: this.database, sql });
+      if (res.ok) {
+        this._selectedKeys = new Set();
+        this.saveSelection();
+        dialog.close();
+        this.loadData();
+      } else {
+        del.disabled = cancel.disabled = false;
+        errBox.textContent = res.error || 'Delete failed';
+        errBox.classList.remove('hidden');
+      }
+    });
+    action.append(cancel, del);
+    box.appendChild(action);
+
+    dialog.appendChild(box);
+    const backdrop = document.createElement('form');
+    backdrop.method = 'dialog';
+    backdrop.className = 'modal-backdrop';
+    backdrop.innerHTML = '<button>close</button>';
+    dialog.appendChild(backdrop);
+    document.body.appendChild(dialog);
+    dialog.addEventListener('close', () => dialog.remove());
+    if (window.lucide) window.lucide.createIcons({ root: box });
+    dialog.showModal();
   }
 
   // Returns true when the given Data-tab column is numeric or date-typed, so
@@ -560,6 +1022,7 @@ class TableDetails extends HTMLElement {
     btn.addEventListener('click', () => this.renderHeaderInput(th, c));
     const right = document.createElement('div');
     right.className = 'flex items-center gap-1';
+    right.appendChild(window.makeCopyButton(c, 'Copy column name'));
     right.appendChild(btn);
     if (active) {
       const clr = document.createElement('button');
@@ -682,8 +1145,8 @@ class TableDetails extends HTMLElement {
   // Renders the current page rows as a collapsible JSON tree via JSONEditor.
   renderJson(target, d, visible) {
     const container = document.createElement('div');
-    container.className = 'border border-base-300 rounded';
-    container.style.height = '600px';
+    container.className = 'border border-base-300 rounded min-h-0 flex-1';
+    container.style.minHeight = '320px';
     target.appendChild(container);
 
     const data = d.rows.map(row => {
@@ -873,6 +1336,20 @@ class TableDetails extends HTMLElement {
     // query.
     const actions = document.createElement('div');
     actions.className = 'flex items-center gap-1';
+    // "Clear selections" is shown only while rows are selected (toggled live by
+    // updateClearSelectionButtons as checkboxes change).
+    const clearBtn = document.createElement('button');
+    clearBtn.type = 'button';
+    clearBtn.setAttribute('data-clear-sel', '');
+    clearBtn.className = 'btn btn-sm btn-ghost text-error gap-1';
+    clearBtn.innerHTML = '<i data-lucide="square-x" class="size-4"></i>Clear selections';
+    clearBtn.classList.toggle('hidden', !(this._selectedKeys && this._selectedKeys.size));
+    clearBtn.addEventListener('click', () => {
+      this._selectedKeys = new Set();
+      this.saveSelection();
+      this.renderResults();
+    });
+    actions.appendChild(clearBtn);
     const infoBtn = document.createElement('button');
     infoBtn.type = 'button';
     infoBtn.className = 'btn btn-sm btn-square btn-ghost';
@@ -995,6 +1472,10 @@ class TableDetails extends HTMLElement {
     target.innerHTML = '';
     const results = document.createElement('div');
     results.setAttribute('data-struct-results', '');
+    results.setAttribute('data-pin', '');
+    results.style.display = 'flex';
+    results.style.flexDirection = 'column';
+    results.style.minHeight = '0';
     target.appendChild(results);
   }
 
@@ -1042,11 +1523,12 @@ class TableDetails extends HTMLElement {
     if (!rows.length) { this.emptyStructure(results); return; }
 
     const wrap = document.createElement('div');
-    wrap.className = 'overflow-x-auto';
+    wrap.className = 'overflow-auto min-h-0 flex-1';
     const table = document.createElement('table');
     table.className = 'table table-zebra table-sm';
 
     const thead = document.createElement('thead');
+    thead.className = 'sticky top-0 z-10 bg-base-100';
     const htr = document.createElement('tr');
     defs.forEach(def => {
       const th = document.createElement('th');
@@ -1094,6 +1576,7 @@ class TableDetails extends HTMLElement {
     table.appendChild(tbody);
     wrap.appendChild(table);
     results.appendChild(wrap);
+    window.pinScrollAreas(this);
   }
 
   // Empty-results state when active filters match nothing, offering a way to
@@ -1150,6 +1633,7 @@ class TableDetails extends HTMLElement {
     btn.addEventListener('click', () => this.renderStructHeaderInput(th, def));
     const right = document.createElement('div');
     right.className = 'flex items-center gap-1';
+    right.appendChild(window.makeCopyButton(def.label, 'Copy column name'));
     right.appendChild(btn);
     if (active) {
       const clr = document.createElement('button');
