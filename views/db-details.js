@@ -149,6 +149,7 @@ class DbDetails extends HTMLElement {
         localStorage.setItem('db-tab', label);
         if (label === 'Relations' && !this._relLoaded) this.loadRelations();
         if (label === 'SQL') this.loadSqlTab();
+        requestAnimationFrame(() => window.pinScrollAreas(this));
       });
     });
     if (active === 'SQL') this.loadSqlTab();
@@ -243,6 +244,24 @@ class DbDetails extends HTMLElement {
     const bar = document.createElement('div');
     bar.className = 'mb-3 flex flex-wrap items-center gap-3';
 
+    // Search by table name (maps to the "name" column filter).
+    const nameInput = document.createElement('input');
+    nameInput.type = 'search';
+    nameInput.className = 'input input-bordered input-lg grow';
+    nameInput.placeholder = 'Find tables by name…';
+    nameInput.value = (this._colFilters && this._colFilters.name) || '';
+    nameInput.addEventListener('input', () => {
+      clearTimeout(this._nameSearchTimer);
+      this._nameSearchTimer = setTimeout(() => {
+        const v = nameInput.value.trim();
+        if (v) this._colFilters.name = v; else delete this._colFilters.name;
+        this._reopenFilter = null;
+        this._focusedNameOnce = true;
+        this.page = 1;
+        this.loadTables();
+      }, 300);
+    });
+
     const input = document.createElement('input');
     input.type = 'search';
     input.className = 'input input-bordered input-lg grow';
@@ -257,11 +276,15 @@ class DbDetails extends HTMLElement {
       }, 300);
     });
 
-    bar.appendChild(input);
+    bar.append(nameInput, input);
     panel.appendChild(bar);
 
     const results = document.createElement('div');
     results.setAttribute('data-results', '');
+    results.setAttribute('data-pin', '');
+    results.style.display = 'flex';
+    results.style.flexDirection = 'column';
+    results.style.minHeight = '0';
     panel.appendChild(results);
   }
 
@@ -311,12 +334,13 @@ class DbDetails extends HTMLElement {
     const totalPages = Math.max(1, Math.ceil(d.total / d.pageSize));
 
     const wrap = document.createElement('div');
-    wrap.className = 'overflow-x-auto';
+    wrap.className = 'overflow-auto min-h-0 flex-1';
     if (Object.values(this._colFilters).some(v => v)) wrap.classList.add('filter-active-border');
     const table = document.createElement('table');
     table.className = 'table table-zebra table-sm';
 
     const thead = document.createElement('thead');
+    thead.className = 'sticky top-0 z-10 bg-base-100';
     const htr = document.createElement('tr');
     // If the last applied filter (before a reload/remount) was on the table
     // name, re-open its filter input focused so the user can keep typing.
@@ -392,7 +416,9 @@ class DbDetails extends HTMLElement {
     wrap.appendChild(table);
     target.appendChild(wrap);
 
-    target.appendChild(this.pagination(d, totalPages));
+    const pager = this.pagination(d, totalPages); pager.classList.add('shrink-0');
+    target.appendChild(pager);
+    window.pinScrollAreas(this);
 
     // Now that the grid is attached to the document, focus the filter input we
     // re-opened (focusing a detached element above is a no-op).
@@ -412,9 +438,12 @@ class DbDetails extends HTMLElement {
   // icon (tinted when active) and a clear icon. Mirrors the Data tab.
   renderHeaderLabel(th, col) {
     const c = col.key;
+    // The name column is filtered via the dedicated "Find tables by name…"
+    // input, so it never shows a header filter/clear control.
+    const filterable = c !== 'name';
     // If this column was being live-filtered as the user typed, re-open its
     // input (restoring the value and caret) instead of showing the label.
-    if (this._reopenFilter && this._reopenFilter.key === c) {
+    if (filterable && this._reopenFilter && this._reopenFilter.key === c) {
       const state = this._reopenFilter;
       this._reopenFilter = null;
       this.renderHeaderInput(th, col);
@@ -459,8 +488,8 @@ class DbDetails extends HTMLElement {
     btn.addEventListener('click', () => this.renderHeaderInput(th, col));
     const right = document.createElement('div');
     right.className = 'flex items-center gap-1';
-    right.appendChild(btn);
-    if (active) {
+    if (filterable) right.appendChild(btn);
+    if (filterable && active) {
       const clr = document.createElement('button');
       clr.type = 'button';
       clr.className = 'btn btn-ghost btn-xs btn-square';
