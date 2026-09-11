@@ -16,6 +16,11 @@ export interface DbProvider {
 
   listObjects(connectionString: string, database: string): Promise<ObjectCategories>;
 
+  searchTables(
+    connectionString: string,
+    term: string
+  ): Promise<{ database: string; tables: { name: string; schemaName: string }[] }[]>;
+
   listTables(
     connectionString: string,
     database: string,
