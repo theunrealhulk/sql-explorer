@@ -68,6 +68,7 @@ class ViewDetails extends HTMLElement {
       this.querySelectorAll('input[role="tab"]').forEach(input => {
         input.addEventListener('change', () => {
           if (input.checked) localStorage.setItem('view-tab', input.getAttribute('aria-label'));
+          requestAnimationFrame(() => window.pinScrollAreas(this));
         });
       });
     }
