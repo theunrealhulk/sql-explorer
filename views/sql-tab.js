@@ -917,6 +917,7 @@ window.SqlScratchTab = {
       renderRows();
       table.appendChild(tbody);
       box.appendChild(table);
+      if (window.enableCellCrosshair) window.enableCellCrosshair(table);
       section.appendChild(box);
       results.appendChild(section);
       ctx.sections.push(section);
