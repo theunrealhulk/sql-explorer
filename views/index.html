@@ -125,6 +125,10 @@ html[data-theme="dark"] .json-num { color: #ff7b72; }
 html[data-theme="dark"] .json-bool { color: #ffa657; }
 html[data-theme="dark"] .json-null { color: #d2a8ff; }
 .json-error { text-decoration: underline wavy #ef4444; text-decoration-skip-ink: none; }
+
+/* Crosshair hover: highlight the hovered row and emphasize the hovered cell. */
+.crosshair-table tbody tr:hover > * { background-color: color-mix(in oklab, var(--color-primary) 12%, transparent) !important; }
+.crosshair-table tbody td:hover { background-color: color-mix(in oklab, var(--color-primary) 30%, transparent) !important; }
 </style>
 </head>
 <body class="bg-base-200 min-h-screen">
@@ -181,6 +185,13 @@ html[data-theme="dark"] .json-null { color: #d2a8ff; }
           <label class="label" for="cs">Connection string</label>
           <input id="cs" class="input input-sm w-full" placeholder="Server=...;Database=master;User Id=...;Password=...;Encrypt=true;TrustServerCertificate=true">
           <button onclick="connect()" class="btn btn-primary btn-sm btn-block"><i data-lucide="plug" class="size-4"></i>Connect</button>
+        </div>
+        <div id="tree-search-box" class="sidebar-search hidden space-y-2">
+          <label class="input input-sm flex items-center gap-2 w-full">
+            <i data-lucide="search" class="size-4 opacity-60"></i>
+            <input id="tree-search" type="search" class="grow" placeholder="Search tables in all databases">
+          </label>
+          <div id="tree-search-results" class="space-y-2"></div>
         </div>
         <div id="tree" class="space-y-2"></div>
         <div id="sidebar-resizer" class="dashed-sep-v absolute top-0 right-0 z-10 h-full w-1.5 cursor-col-resize"></div>
@@ -258,6 +269,47 @@ function icon(name, cls) {
   return i;
 }
 function refreshIcons() { if (window.lucide) lucide.createIcons(); }
+
+// Caps every [data-pin] scroll area to the viewport bottom so its table body
+// scrolls internally (with a sticky header) instead of growing the page. Hidden
+// (inactive-tab) areas are skipped and re-pinned when their tab is shown.
+window.pinScrollAreas = function (root) {
+  const scope = root || document;
+  scope.querySelectorAll('[data-pin]').forEach(el => {
+    if (!el.offsetParent) return;
+    const top = el.getBoundingClientRect().top;
+    el.style.maxHeight = Math.max(200, window.innerHeight - top - 40) + 'px';
+  });
+};
+window.addEventListener('resize', () => window.pinScrollAreas());
+
+// Builds a small ghost icon button that copies `text` to the clipboard when
+// clicked, briefly swapping to a check icon for feedback.
+window.makeCopyButton = function (text, title) {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'btn btn-ghost btn-xs btn-square';
+  btn.title = title || ('Copy "' + text + '"');
+  btn.innerHTML = '<i data-lucide="copy" class="size-3"></i>';
+  btn.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    try { await navigator.clipboard.writeText(String(text)); } catch (err) { /* clipboard unavailable */ }
+    btn.innerHTML = '<i data-lucide="check" class="size-3 text-success"></i>';
+    if (window.lucide) window.lucide.createIcons({ root: btn });
+    setTimeout(() => {
+      btn.innerHTML = '<i data-lucide="copy" class="size-3"></i>';
+      if (window.lucide) window.lucide.createIcons({ root: btn });
+    }, 1000);
+  });
+  return btn;
+};
+
+// Enables the crosshair hover on a data table (row + current cell highlight,
+// handled entirely by the .crosshair-table CSS rules).
+window.enableCellCrosshair = function (table) {
+  if (!table) return;
+  table.classList.add('crosshair-table');
+};
 
 // Breadcrumbs: Server > current db (if any) > current table (if any)
 function renderCrumbs() {
@@ -672,7 +724,25 @@ function updateCrumbActions() {
   host.innerHTML = '';
   const comp = document.querySelector('#detail table-details, #detail db-details, #detail view-details');
   const ctrl = comp && comp.tabController;
-  if (!ctrl) return;
+  if (!ctrl) {
+    // Server view (no db/table selected): show a SQL button in the same spot as
+    // the tabbed views. Toggles between the database grid and a server-level
+    // SQL editor.
+    if (CS && !currentDb && !currentTable) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'btn btn-sm ' + (serverSqlActive ? 'btn-primary' : 'btn-ghost');
+      btn.innerHTML = '<i data-lucide="scroll-text" class="size-4"></i>SQL';
+      btn.addEventListener('click', () => {
+        if (serverSqlActive) renderServerHome();
+        else showServerSql();
+        updateCrumbActions();
+      });
+      host.appendChild(btn);
+      if (window.lucide) window.lucide.createIcons({ root: host });
+    }
+    return;
+  }
   const tabs = ctrl.tabs();
   if (!tabs || tabs.length < 2) return;
   const active = ctrl.activeTab();
@@ -829,6 +899,7 @@ function clearTableDetails() {
 // Home screen (server view, nothing selected): a grid of database widgets, each
 // showing the db name plus table / view / relation counts as icon:value stats.
 let dbStats = [];   // [{ name, tables, views, relations }]
+let serverSqlActive = false;   // whether the server-level SQL editor is shown
 
 async function loadDbStats() {
   if (!CS) return;
@@ -845,6 +916,23 @@ function renderServerHome() {
   const host = document.getElementById('detail');
   if (!host) return;
   host.innerHTML = '';
+
+  // Cross-database table search: the first thing on the server view, before the
+  // database grid. Typing a term lists matching tables grouped by database.
+  serverSqlActive = false;
+  const searchLabel = document.createElement('label');
+  searchLabel.className = 'input input-bordered flex items-center gap-2 w-full max-w-xl mb-4';
+  searchLabel.appendChild(icon('search'));
+  const searchInput = document.createElement('input');
+  searchInput.type = 'search';
+  searchInput.className = 'grow';
+  searchInput.placeholder = 'Search tables in all databases on this server';
+  searchLabel.appendChild(searchInput);
+  host.appendChild(searchLabel);
+
+  const results = document.createElement('div');
+  results.className = 'space-y-3 hidden';
+  host.appendChild(results);
 
   const grid = document.createElement('div');
   grid.style.display = 'grid';
@@ -902,7 +990,191 @@ function renderServerHome() {
 
   host.appendChild(grid);
   refreshIcons();
+  updateCrumbActions();
+
+  let timer = null;
+  let seq = 0;
+  searchInput.addEventListener('input', () => {
+    const term = searchInput.value.trim();
+    clearTimeout(timer);
+    if (!term) {
+      results.innerHTML = '';
+      results.classList.add('hidden');
+      grid.classList.remove('hidden');
+      return;
+    }
+    timer = setTimeout(async () => {
+      const my = ++seq;
+      const groups = await searchTablesAllDbs(term);
+      if (my !== seq) return; // a newer keystroke superseded this request
+      grid.classList.add('hidden');
+      results.classList.remove('hidden');
+      renderServerSearchResults(results, groups, term);
+    }, 250);
+  });
 }
+
+// Server-level SQL editor: mounts the shared SQL scratch tab into the main
+// content so queries can run without first selecting a database. Uses the first
+// available database (or master) as the initial context.
+function showServerSql() {
+  const placeholder = document.getElementById('placeholder');
+  if (placeholder) placeholder.style.display = 'none';
+  const host = document.getElementById('detail');
+  if (!host || !window.SqlScratchTab) return;
+  serverSqlActive = true;
+  host.innerHTML = '';
+  const db = (dbStats[0] && dbStats[0].name) || 'master';
+  window.SqlScratchTab.mount(host, { cs: CS, database: db });
+}
+
+// Queries the server for tables whose name matches `term` across every database
+// on the current connection. Returns [{ database, tables:[{name,schemaName}] }].
+async function searchTablesAllDbs(term) {
+  if (!CS || !term) return [];
+  try {
+    const res = await api('search-tables', { connectionString: CS, term });
+    return (res.ok && Array.isArray(res.results)) ? res.results : [];
+  } catch (e) {
+    return [];
+  }
+}
+
+// Renders cross-database search results (server home): one card per database
+// listing its matching tables as clickable chips.
+function renderServerSearchResults(container, results, term) {
+  container.innerHTML = '';
+  if (!results.length) {
+    const empty = document.createElement('p');
+    empty.className = 'text-base-content/60';
+    empty.textContent = 'No tables match “' + term + '”.';
+    container.appendChild(empty);
+    return;
+  }
+  results.forEach(group => {
+    const card = document.createElement('div');
+    card.className = 'card bg-base-100 border border-base-300 p-4 shadow-sm';
+
+    const title = document.createElement('div');
+    title.className = 'mb-3 flex items-center gap-2 font-bold break-all';
+    title.appendChild(icon('database'));
+    const name = document.createElement('span');
+    name.textContent = group.database;
+    title.appendChild(name);
+    const badge = document.createElement('span');
+    badge.className = 'badge badge-sm badge-ghost';
+    badge.textContent = group.tables.length + (group.tables.length === 1 ? ' table' : ' tables');
+    title.appendChild(badge);
+    card.appendChild(title);
+
+    const list = document.createElement('div');
+    list.className = 'flex flex-wrap gap-2';
+    group.tables.forEach(t => {
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'btn btn-sm btn-ghost border border-base-300 gap-1';
+      chip.appendChild(icon('table'));
+      chip.appendChild(document.createTextNode(t.name));
+      chip.addEventListener('click', () => selectTable(group.database, { name: t.name, schemaName: t.schemaName }));
+      list.appendChild(chip);
+    });
+    card.appendChild(list);
+    container.appendChild(card);
+  });
+  refreshIcons();
+}
+
+// Wires the sidebar cross-database table search input. Results replace the
+// database tree while a term is present and are grouped by database.
+function setupSidebarSearch() {
+  const input = document.getElementById('tree-search');
+  const results = document.getElementById('tree-search-results');
+  const tree = document.getElementById('tree');
+  if (!input || input.dataset.wired) return;
+  input.dataset.wired = '1';
+  let timer = null;
+  let seq = 0;
+  input.addEventListener('input', () => {
+    const term = input.value.trim();
+    clearTimeout(timer);
+    if (!term) {
+      results.innerHTML = '';
+      results.classList.add('hidden');
+      tree.classList.remove('hidden');
+      return;
+    }
+    timer = setTimeout(async () => {
+      const my = ++seq;
+      const groups = await searchTablesAllDbs(term);
+      if (my !== seq) return; // a newer keystroke superseded this request
+      tree.classList.add('hidden');
+      results.classList.remove('hidden');
+      renderSidebarSearchResults(groups, term);
+    }, 250);
+  });
+}
+
+// Renders cross-database search results in the sidebar: one collapsible node per
+// database listing its matching tables. Clicking a table navigates to it.
+function renderSidebarSearchResults(results, term) {
+  const host = document.getElementById('tree-search-results');
+  if (!host) return;
+  host.innerHTML = '';
+  if (!results.length) {
+    const empty = document.createElement('p');
+    empty.className = 'text-sm text-base-content/60 px-1';
+    empty.textContent = 'No tables match “' + term + '”.';
+    host.appendChild(empty);
+    return;
+  }
+  results.forEach(group => {
+    const d = document.createElement('details');
+    d.open = true;
+    d.className = 'collapse collapse-arrow border border-base-300 bg-base-100 rounded-box';
+    const summary = document.createElement('summary');
+    summary.className = 'collapse-title flex items-center gap-2 font-medium border border-green-500 bg-green-500/10 rounded-lg text-base-content';
+    summary.appendChild(icon('database'));
+    const name = document.createElement('span');
+    name.textContent = group.database;
+    summary.appendChild(name);
+    const badge = document.createElement('span');
+    badge.className = 'badge badge-sm bg-green-900 text-white border-none';
+    badge.textContent = group.tables.length;
+    summary.appendChild(badge);
+    const content = document.createElement('div');
+    content.className = 'collapse-content space-y-1';
+    group.tables.forEach(t => {
+      const row = document.createElement('label');
+      row.className = 'item-row flex items-center gap-2 rounded px-2 py-1 hover:bg-base-200 cursor-pointer';
+      row.appendChild(icon('table'));
+      const label = document.createElement('span');
+      label.textContent = t.name;
+      row.appendChild(label);
+      row.addEventListener('click', () => selectTable(group.database, { name: t.name, schemaName: t.schemaName }));
+      content.appendChild(row);
+    });
+    d.appendChild(summary);
+    d.appendChild(content);
+    host.appendChild(d);
+  });
+  refreshIcons();
+}
+
+// Resets and reveals the sidebar search once a connection is established.
+function resetSidebarSearch(show) {
+  const box = document.getElementById('tree-search-box');
+  const input = document.getElementById('tree-search');
+  const results = document.getElementById('tree-search-results');
+  const tree = document.getElementById('tree');
+  if (!box) return;
+  if (input) input.value = '';
+  if (results) { results.innerHTML = ''; results.classList.add('hidden'); }
+  // Don't override the collapsed sidebar: keep the tree/search hidden then.
+  const collapsed = document.getElementById('sidebar')?.classList.contains('sidebar-collapsed');
+  if (tree) tree.classList.toggle('hidden', !!collapsed);
+  box.classList.toggle('hidden', !!collapsed || !show);
+}
+
 
 // Renders a connection picker in the main content area: a grid of the supported
 // RDBMS engines plus a connection-string input. The input stays disabled until
@@ -1169,6 +1441,7 @@ function applySidebarCollapsed(collapsed) {
   const label = sidebar.querySelector('.sidebar-label');
   const conn = sidebar.querySelector('.sidebar-conn');
   const tree = document.getElementById('tree');
+  const searchBox = document.getElementById('tree-search-box');
   const resizer = document.getElementById('sidebar-resizer');
   sidebar.classList.toggle('sidebar-collapsed', collapsed);
   if (collapsed) {
@@ -1182,6 +1455,8 @@ function applySidebarCollapsed(collapsed) {
     if (!sidebar.style.width) sidebar.classList.add('w-80');
   }
   [label, conn, tree, resizer].forEach(el => { if (el) el.classList.toggle('hidden', collapsed); });
+  // The table-search box only shows when expanded AND connected.
+  if (searchBox) searchBox.classList.toggle('hidden', collapsed || !CS);
 }
 
 // Lets the user drag the right edge of the sidebar to resize it.
@@ -1852,6 +2127,7 @@ async function connect() {
   const status = document.getElementById('status');
   const tree = document.getElementById('tree');
   tree.innerHTML = '';
+  resetSidebarSearch(false);
   currentDb = null; currentTable = null; dbCounts = {}; dbTables = {}; renderCrumbs();
   navHistory = []; navIndex = -1; updateNavButtons();
   const data = await api('connect', { connectionString: CS });
@@ -1860,6 +2136,8 @@ async function connect() {
   renderInfo();
   data.databases.forEach(db => tree.appendChild(dbNode(db)));
   refreshIcons();
+  resetSidebarSearch(true);
+  setupSidebarSearch();
   saveTabs();
   renderTabs();
   await applyContext(at ? at.context : null);
@@ -1895,6 +2173,7 @@ async function applyContext(saved) {
   const tab = activeTab();
   if (tab && tab.type === 'connection') {
     renderCrumbs(); renderInfo(); clearTableDetails(); highlightDb(null); updateNavButtons();
+    resetSidebarSearch(false);
     renderConnectionPicker();
     return;
   }
