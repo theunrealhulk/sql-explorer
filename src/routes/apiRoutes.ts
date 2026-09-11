@@ -18,6 +18,7 @@ const upload = multer({ storage });
 router.post('/connect', DatabaseController.connect);
 router.post('/db-stats', DatabaseController.dbStats);
 router.post('/objects', DatabaseController.objects);
+router.post('/search-tables', DatabaseController.searchTables);
 router.post('/tables', DatabaseController.tables);
 router.post('/columns', DatabaseController.columns);
 router.post('/data', DatabaseController.data);
