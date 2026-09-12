@@ -278,6 +278,59 @@ export class SqlServerModel {
     }
   }
 
+  // Search for tables whose name matches `term` across every database on the
+  // server. Database names come from sys.databases (not user input) and are
+  // bracket/quote-escaped; the search term is passed as a bound parameter, so
+  // each query is injection-safe. Databases are queried independently so that a
+  // single inaccessible database can't fail the whole search. Results grouped by db.
+  static async searchTables(
+    connectionString: string,
+    term: string
+  ): Promise<{ database: string; tables: { name: string; schemaName: string }[] }[]> {
+    const t = (term || '').trim();
+    if (!t) return [];
+    const escLike = (s: string): string => s.replace(/[%_[]/g, (m) => '[' + m + ']');
+    const pool = await getPool(connectionString);
+    try {
+      const dbs = (
+        await pool.request().query<{ name: string }>(
+          'SELECT name FROM sys.databases WHERE state = 0 ORDER BY name'
+        )
+      ).recordset.map((r) => r.name);
+      if (!dbs.length) return [];
+      const like = '%' + escLike(t) + '%';
+      const groups: { database: string; tables: { name: string; schemaName: string }[] }[] = [];
+      for (const db of dbs) {
+        const q = qid(db);
+        try {
+          const rows = (
+            await pool
+              .request()
+              .input('term', like)
+              .query<{ schemaName: string; name: string }>(
+                `SELECT s.name AS schemaName, o.name AS name
+                   FROM ${q}.sys.tables o
+                   JOIN ${q}.sys.schemas s ON s.schema_id = o.schema_id
+                   WHERE o.name LIKE @term
+                   ORDER BY o.name`
+              )
+          ).recordset;
+          if (rows.length) {
+            groups.push({
+              database: db,
+              tables: rows.map((r) => ({ name: r.name, schemaName: r.schemaName })),
+            });
+          }
+        } catch {
+          // Skip databases the login can't read (permissions, offline, etc.).
+        }
+      }
+      return groups;
+    } finally {
+      await pool.close();
+    }
+  }
+
   // Paginated + sorted list of tables (sorting/pagination done in SQL)
   static async listTables(
     connectionString: string,

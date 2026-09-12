@@ -50,6 +50,16 @@ export class DatabaseController {
     }
   }
 
+  static async searchTables(req: Request, res: Response): Promise<void> {
+    const { connectionString, term } = req.body;
+    try {
+      const results = await getModel(connectionString).searchTables(connectionString, term || '');
+      res.json({ ok: true, results });
+    } catch (err) {
+      res.status(400).json({ ok: false, error: (err as Error).message });
+    }
+  }
+
   static async columns(req: Request, res: Response): Promise<void> {
     const { connectionString, database, schema, table } = req.body;
     try {
