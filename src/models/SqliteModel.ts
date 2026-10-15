@@ -364,6 +364,7 @@ export class SqliteModel {
           info.forEach((i) => uniqueCols.add(i.name));
         }
       }
+      const pkCount = cols.filter((c) => c.pk > 0).length;
       return cols.map((c) => ({
         name: c.name,
         type: c.type || '',
@@ -372,6 +373,8 @@ export class SqliteModel {
         isPrimaryKey: c.pk > 0,
         isForeignKey: fkCols.has(c.name),
         isUnique: uniqueCols.has(c.name) || c.pk > 0,
+        // A lone INTEGER PRIMARY KEY aliases rowid and is auto-assigned.
+        isGenerated: c.pk > 0 && pkCount === 1 && (c.type || '').toUpperCase() === 'INTEGER',
       }));
     } finally {
       db.close();
@@ -576,7 +579,8 @@ export class SqliteModel {
     caseSensitive = false,
     columnFilters: Record<string, string> = {},
     sortColumn = '',
-    sortDir = ''
+    sortDir = '',
+    exact = false
   ): Promise<TableData> {
     const db = openDb(connectionString);
     try {
@@ -596,9 +600,11 @@ export class SqliteModel {
 
       const term = (search || '').trim();
       if (term && realCols.length) {
-        const pattern = fuzzy
-          ? '%' + [...term].map(escLike).join('%') + '%'
-          : '%' + escLike(term) + '%';
+        const pattern = exact
+          ? escLike(term)
+          : fuzzy
+            ? '%' + [...term].map(escLike).join('%') + '%'
+            : '%' + escLike(term) + '%';
         // SQLite LIKE is case-insensitive for ASCII by default; use GLOB or a
         // case fold for case sensitivity.
         const conds = realCols.map((c) => {
