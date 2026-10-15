@@ -93,6 +93,7 @@ export interface DbProvider {
     caseSensitive?: boolean,
     columnFilters?: Record<string, string>,
     sortColumn?: string,
-    sortDir?: string
+    sortDir?: string,
+    exact?: boolean
   ): Promise<TableData>;
 }
