@@ -342,7 +342,7 @@ window.SqlScratchTab = {
 
     const ctx = { results, sections: [], current: 0, refreshBtn, trashBtn, selectedRow: null, opts, view, editMeta: null };
     // Result view mode: 'table' (default) or 'json'. Persisted across mounts.
-    ctx.viewMode = localStorage.getItem('sql-result-view') === 'json' ? 'json' : 'table';
+    ctx.viewMode = localStorage.getItem(window.tabKey(opts.tabId, 'sql-result-view')) === 'json' ? 'json' : 'table';
     ctx.lastResult = null;
     // Per-result-set filter/sort state (rebuilt on each render, persisted so it
     // survives refreshes/remounts alongside the cached result).
@@ -376,7 +376,7 @@ window.SqlScratchTab = {
     const setViewMode = (mode) => {
       if (mode === ctx.viewMode) return;
       ctx.viewMode = mode;
-      try { localStorage.setItem('sql-result-view', mode); } catch (e) { /* ignore */ }
+      try { localStorage.setItem(window.tabKey(opts.tabId, 'sql-result-view'), mode); } catch (e) { /* ignore */ }
       vertical = mode === 'json';
       applyOrientation();
       updateViewButtons();
@@ -960,7 +960,7 @@ window.SqlScratchTab = {
     const scope = opts && opts.table
       ? 't:' + (opts.schema || 'dbo') + '.' + opts.table
       : 'db';
-    return 'sql-tab:' + db + ':' + scope;
+    return window.tabKey(opts && opts.tabId, 'sql-tab:' + db + ':' + scope);
   },
 
   // Fetches (and caches per table) the column types + FK option lists needed to
