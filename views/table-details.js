@@ -10,10 +10,11 @@ class TableDetails extends HTMLElement {
     this.page = 1;
     this.pageSize = 50;
     this.hiddenColumns = new Set();
-    this.dataView = localStorage.getItem('data-view') || 'table';
+    this.dataView = 'table';
     this.search = '';
     this.fuzzy = false;
     this.caseSensitive = false;
+    this.exact = false;
     this._searchTimer = null;
     this._jsonEditor = null;
     this._jsonCollapsed = new Set();
@@ -28,6 +29,8 @@ class TableDetails extends HTMLElement {
     this._editMeta = null;
     this._selectedKeys = new Set();
     this._lastCheckedIndex = null;
+    this._pendingRows = [];
+    this._pendingError = '';
     this._uid = 'td-' + Math.random().toString(36).slice(2);
   }
 
@@ -35,6 +38,8 @@ class TableDetails extends HTMLElement {
   get database() { return this.getAttribute('database') || ''; }
   get schema() { return this.getAttribute('schema') || 'dbo'; }
   get table() { return this.getAttribute('table') || ''; }
+  get tabId() { return this.getAttribute('tab-id') || ''; }
+  storeKey(k) { return window.tabKey(this.tabId, k); }
 
   // Which tabs to render. Defaults to all four; a comma-separated `tabs`
   // attribute (e.g. tabs="Data,Structure") restricts and orders them.
@@ -88,6 +93,7 @@ class TableDetails extends HTMLElement {
     this.search = '';
     this.fuzzy = false;
     this.caseSensitive = false;
+    this.exact = false;
     this._colFilter = '';
     this._colMenuOpen = false;
     this._colFilters = {};
@@ -95,6 +101,8 @@ class TableDetails extends HTMLElement {
     this._structSortCol = null;
     this._structSortDir = 1;
     this._editMeta = null;
+    this._pendingRows = [];
+    this._pendingError = '';
     if (this._sqlCtrl) { this._sqlCtrl.destroy(); this._sqlCtrl = null; }
     this._sqlTab = false;
     this.renderShell();
@@ -118,10 +126,11 @@ class TableDetails extends HTMLElement {
   // Persist per-table UI state (hidden columns + per-column filters) so it
   // survives a refresh. Keyed by the table's fully-qualified identity.
   stateKey() {
-    return 'sql-explorer-tablestate:' + this.database + '.' + this.schema + '.' + this.table;
+    return this.storeKey('sql-explorer-tablestate:' + this.database + '.' + this.schema + '.' + this.table);
   }
 
   loadTableState() {
+    this.dataView = localStorage.getItem(this.storeKey('data-view')) || 'table';
     this.hiddenColumns = new Set();
     this._colFilters = {};
     this._sortCol = null;
@@ -129,6 +138,7 @@ class TableDetails extends HTMLElement {
     this.search = '';
     this.fuzzy = false;
     this.caseSensitive = false;
+    this.exact = false;
     this._structColFilters = {};
     this._structSortCol = null;
     this._structSortDir = 1;
@@ -145,6 +155,7 @@ class TableDetails extends HTMLElement {
       if (typeof s.search === 'string') this.search = s.search;
       if (typeof s.fuzzy === 'boolean') this.fuzzy = s.fuzzy;
       if (typeof s.caseSensitive === 'boolean') this.caseSensitive = s.caseSensitive;
+      if (typeof s.exact === 'boolean') this.exact = s.exact;
       if (s.structFilters && typeof s.structFilters === 'object') this._structColFilters = s.structFilters;
       if (typeof s.structSortCol === 'string') this._structSortCol = s.structSortCol;
       if (s.structSortDir === -1 || s.structSortDir === 1) this._structSortDir = s.structSortDir;
@@ -164,6 +175,7 @@ class TableDetails extends HTMLElement {
         search: this.search,
         fuzzy: this.fuzzy,
         caseSensitive: this.caseSensitive,
+        exact: this.exact,
         structFilters: this._structColFilters,
         structSortCol: this._structSortCol,
         structSortDir: this._structSortDir,
@@ -176,7 +188,7 @@ class TableDetails extends HTMLElement {
   renderShell() {
     const panel = 'tab-content bg-base-100 border-base-300 p-4';
     const allowed = this.allowedTabs;
-    const saved = localStorage.getItem('table-tab') || 'Data';
+    const saved = localStorage.getItem(this.storeKey('table-tab')) || 'Data';
     const active = allowed.includes(saved) ? saved : allowed[0];
     const tab = (label, panelName, body) =>
       '<input type="radio" name="' + this._uid + '" role="tab" class="tab" aria-label="' + label + '"' +
@@ -206,7 +218,7 @@ class TableDetails extends HTMLElement {
       input.addEventListener('change', () => {
         if (!input.checked) return;
         const label = input.getAttribute('aria-label');
-        localStorage.setItem('table-tab', label);
+        localStorage.setItem(this.storeKey('table-tab'), label);
         if (label === 'SQL') this.loadSqlTab();
         requestAnimationFrame(() => window.pinScrollAreas(this));
       });
@@ -240,7 +252,7 @@ class TableDetails extends HTMLElement {
     const target = this.panel('sql');
     if (!target) return;
     this._sqlTab = true;
-    window.SqlScratchTab.mount(target, { cs: this.cs, database: this.database, schema: this.schema, table: this.table })
+    window.SqlScratchTab.mount(target, { cs: this.cs, database: this.database, schema: this.schema, table: this.table, tabId: this.tabId })
       .then(ctrl => { this._sqlCtrl = ctrl; });
   }
 
@@ -316,7 +328,7 @@ class TableDetails extends HTMLElement {
       btn.addEventListener('click', () => {
         if (this.dataView === mode) return;
         this.dataView = mode;
-        localStorage.setItem('data-view', mode);
+        localStorage.setItem(this.storeKey('data-view'), mode);
         viewBar.querySelectorAll('button').forEach(b => {
           b.classList.toggle('btn-active', b.dataset.view === mode);
           b.classList.toggle('btn-primary', b.dataset.view === mode);
@@ -348,6 +360,17 @@ class TableDetails extends HTMLElement {
     caseText.textContent = 'Case sensitive';
     caseLabel.append(caseBox, caseText);
 
+    const exactLabel = document.createElement('label');
+    exactLabel.className = 'label cursor-pointer gap-2';
+    const exactBox = document.createElement('input');
+    exactBox.type = 'checkbox';
+    exactBox.className = 'checkbox checkbox-sm';
+    exactBox.checked = this.exact;
+    const exactText = document.createElement('span');
+    exactText.className = 'label-text whitespace-nowrap';
+    exactText.textContent = 'Exact match';
+    exactLabel.append(exactBox, exactText);
+
     const input = document.createElement('input');
     input.type = 'search';
     input.className = 'input input-bordered input-lg grow';
@@ -357,8 +380,16 @@ class TableDetails extends HTMLElement {
     // Slot filled by renderData with the column chooser for the current data.
     const colSlot = document.createElement('div');
     colSlot.setAttribute('data-colslot', '');
+    // Fuzzy and Exact match are mutually exclusive.
     fuzzyBox.addEventListener('change', () => {
       this.fuzzy = fuzzyBox.checked;
+      if (this.fuzzy) { this.exact = false; exactBox.checked = false; }
+      this.saveTableState();
+      if (this.search) { this.page = 1; this.loadData(); }
+    });
+    exactBox.addEventListener('change', () => {
+      this.exact = exactBox.checked;
+      if (this.exact) { this.fuzzy = false; fuzzyBox.checked = false; }
       this.saveTableState();
       if (this.search) { this.page = 1; this.loadData(); }
     });
@@ -377,7 +408,7 @@ class TableDetails extends HTMLElement {
       }, 300);
     });
 
-    bar.append(colSlot, viewBar, fuzzyLabel, caseLabel, input);
+    bar.append(colSlot, viewBar, fuzzyLabel, caseLabel, exactLabel, input);
     target.appendChild(bar);
 
     const results = document.createElement('div');
@@ -409,6 +440,7 @@ class TableDetails extends HTMLElement {
       search: this.search,
       fuzzy: this.fuzzy,
       caseSensitive: this.caseSensitive,
+      exact: this.exact,
       columnFilters: this._colFilters,
       sortColumn: this._sortCol || '',
       sortDir: this._sortDir === -1 ? 'desc' : 'asc',
@@ -539,6 +571,10 @@ class TableDetails extends HTMLElement {
     const tbody = document.createElement('tbody');
     const rowChecks = [];
     const allSelected = () => d.rows.every(r => this._selectedKeys.has(this.rowKey(r)));
+    // Duplicates whose source row isn't on this page are shown at the top.
+    const pageKeys = new Set(d.rows.map(r => this.rowKey(r)));
+    this._pendingRows.filter(p => !pageKeys.has(p.afterKey))
+      .forEach(p => tbody.appendChild(this.pendingRowEl(p, visible)));
     d.rows.forEach((row, i) => {
       const key = this.rowKey(row);
       const tr = document.createElement('tr');
@@ -574,16 +610,8 @@ class TableDetails extends HTMLElement {
       rowChecks.push({ cb, row, key });
       selTd.appendChild(cb);
       tr.appendChild(selTd);
-      // Right-clicking a row selects it (if not already) and opens the menu.
       tr.addEventListener('contextmenu', (e) => {
         e.preventDefault();
-        if (!this._selectedKeys.has(key)) {
-          this._selectedKeys.add(key);
-          this.saveSelection();
-          cb.checked = true;
-          selAll.checked = allSelected();
-          this.updateClearSelectionButtons();
-        }
         this.showRowContextMenu(e, row);
       });
       visible.forEach(c => {
@@ -595,6 +623,8 @@ class TableDetails extends HTMLElement {
         tr.appendChild(td);
       });
       tbody.appendChild(tr);
+      this._pendingRows.filter(p => p.afterKey === key)
+        .forEach(p => tbody.appendChild(this.pendingRowEl(p, visible)));
     });
     selAll.checked = d.rows.length > 0 && allSelected();
     table.appendChild(tbody);
@@ -689,7 +719,9 @@ class TableDetails extends HTMLElement {
         if (!res.ok) throw new Error(res.error || 'Update failed');
         const affected = Array.isArray(res.rowsAffected) ? res.rowsAffected.reduce((a, b) => a + b, 0) : null;
         if (affected === 0) throw new Error('No rows matched (table needs a primary key).');
+        const oldKey = this.rowKey(row);
         row[col] = newVal === '' ? null : newVal;
+        this.rekeySelection(oldKey, row);
         restore(newVal);
       } catch (e) {
         ok.disabled = cancel.disabled = input.disabled = false;
@@ -718,7 +750,7 @@ class TableDetails extends HTMLElement {
   rowFromKey(key) { try { return JSON.parse(key); } catch (e) { return null; } }
 
   selectionStorageKey() {
-    return 'sql-explorer-selection:' + this.database + '.' + this.schema + '.' + this.table;
+    return this.storeKey('sql-explorer-selection:' + this.database + '.' + this.schema + '.' + this.table);
   }
 
   loadSelection() {
@@ -731,6 +763,13 @@ class TableDetails extends HTMLElement {
 
   saveSelection() {
     try { localStorage.setItem(this.selectionStorageKey(), JSON.stringify([...this._selectedKeys])); } catch (e) { /* ignore */ }
+  }
+
+  // Row keys are value-based, so an edited row must move to its new key to stay selected.
+  rekeySelection(oldKey, row) {
+    if (!this._selectedKeys.delete(oldKey)) return;
+    this._selectedKeys.add(this.rowKey(row));
+    this.saveSelection();
   }
 
   // Shows/hides the pagination "Clear selections" buttons based on the current
@@ -762,13 +801,13 @@ class TableDetails extends HTMLElement {
     };
 
     const selectedKeys = [...this._selectedKeys];
-    const multi = selectedKeys.length > 1;
-    // Editing targets a single row, so it's disabled when several are selected.
-    menu.appendChild(item('pencil', 'Edit', () => this.openRowEditModal(row), null, multi));
-    // Delete acts on all selected rows (reconstructed from their stored keys),
-    // or just this row when nothing is selected.
-    const delRows = selectedKeys.length ? selectedKeys.map(k => this.rowFromKey(k)).filter(Boolean) : [row];
-    const delLabel = multi ? 'Delete selected rows' : 'Delete';
+    // Delete covers the whole selection only when the clicked row is part of it.
+    const useSelection = selectedKeys.length > 1 && this._selectedKeys.has(this.rowKey(row));
+    // Edit/Duplicate always act on the right-clicked row.
+    menu.appendChild(item('pencil', 'Edit', () => this.openRowEditModal(row)));
+    menu.appendChild(item('copy', 'Duplicate', () => this.duplicateRow(row)));
+    const delRows = useSelection ? selectedKeys.map(k => this.rowFromKey(k)).filter(Boolean) : [row];
+    const delLabel = useSelection ? 'Delete ' + selectedKeys.length + ' selected rows' : 'Delete';
     menu.appendChild(item('trash', delLabel, () => this.openDeleteModal(delRows), 'text-error'));
 
     document.body.appendChild(menu);
@@ -791,6 +830,97 @@ class TableDetails extends HTMLElement {
     if (this._rowMenu) { this._rowMenu.remove(); this._rowMenu = null; }
     if (this._onMenuDismiss) { document.removeEventListener('mousedown', this._onMenuDismiss); this._onMenuDismiss = null; }
     if (this._onMenuKey) { document.removeEventListener('keydown', this._onMenuKey); this._onMenuKey = null; }
+  }
+
+  // Queues an unsaved copy of a row; it is only inserted when Save is clicked.
+  async duplicateRow(row) {
+    await this.ensureEditMeta();
+    const values = {};
+    Object.keys(row).forEach(c => { values[c] = row[c] === null || row[c] === undefined ? '' : String(row[c]); });
+    // Only one unsaved duplicate at a time: a new one replaces any pending row.
+    this._pendingRows = [{ afterKey: this.rowKey(row), values }];
+    this._pendingError = '';
+    this.renderResults();
+    const p = this._pendingRows[this._pendingRows.length - 1];
+    const tr = [...this.querySelectorAll('tr[data-pending]')].find(t => t._pending === p);
+    const first = tr && tr.querySelector('input:not(:disabled), textarea:not(:disabled)');
+    if (first) first.focus();
+  }
+
+  // Editable row of inputs for a pending duplicate; edits are kept in `p.values`.
+  pendingRowEl(p, visible) {
+    const colByName = (this._editMeta && this._editMeta.colByName) || {};
+    const tr = document.createElement('tr');
+    tr.className = 'bg-primary/10';
+    // Outline (not border) because table rows ignore borders under border-collapse.
+    tr.style.outline = '2px dashed var(--color-warning, #eab308)';
+    tr.style.outlineOffset = '-2px';
+    tr.setAttribute('data-pending', '');
+    tr._pending = p;
+    const ctl = document.createElement('td');
+    ctl.className = 'w-8';
+    const rm = document.createElement('button');
+    rm.type = 'button';
+    rm.className = 'btn btn-xs btn-square btn-ghost text-error';
+    rm.title = 'Discard this new row';
+    rm.innerHTML = '<i data-lucide="x" class="size-3"></i>';
+    const discard = () => {
+      this._pendingRows = this._pendingRows.filter(x => x !== p);
+      if (!this._pendingRows.length) this._pendingError = '';
+      this.renderResults();
+    };
+    rm.addEventListener('click', discard);
+    tr.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') { e.preventDefault(); discard(); }
+    });
+    ctl.appendChild(rm);
+    tr.appendChild(ctl);
+    visible.forEach(c => {
+      const td = document.createElement('td');
+      const long = String(p.values[c] || '').length > 60;
+      const inp = document.createElement(long ? 'textarea' : 'input');
+      if (long) {
+        inp.className = 'textarea textarea-xs w-full min-w-64 leading-snug';
+        inp.rows = Math.min(6, Math.ceil(p.values[c].length / 40));
+      } else {
+        inp.type = 'text';
+        inp.className = 'input input-xs input-bordered w-full min-w-24';
+      }
+      if ((colByName[c] || {}).isGenerated) {
+        inp.disabled = true;
+        inp.placeholder = 'auto';
+      } else {
+        inp.value = p.values[c];
+        inp.addEventListener('input', () => { p.values[c] = inp.value; });
+      }
+      td.appendChild(inp);
+      tr.appendChild(td);
+    });
+    if (window.lucide) window.lucide.createIcons({ root: tr });
+    return tr;
+  }
+
+  // Inserts the pending duplicates one by one (generated columns are left to the
+  // database); stops at the first failure so already-saved rows aren't re-sent.
+  async savePendingRows() {
+    if (!this._pendingRows.length) return;
+    const { colByName } = await this.ensureEditMeta();
+    const target = this._qid(this.schema) + '.' + this._qid(this.table);
+    this.querySelectorAll('[data-save-pending]').forEach(b => { b.disabled = true; });
+    this._pendingError = '';
+    while (this._pendingRows.length) {
+      const p = this._pendingRows[0];
+      const cols = Object.keys(p.values).filter(c => !(colByName[c] || {}).isGenerated);
+      const sql = cols.length
+        ? 'INSERT INTO ' + target + ' (' + cols.map(c => this._qid(c)).join(', ') + ') VALUES (' +
+          cols.map(c => this._sqlLiteral(p.values[c] === '' ? null : p.values[c], (colByName[c] || {}).type)).join(', ') + ');'
+        : 'INSERT INTO ' + target + ' DEFAULT VALUES;';
+      const res = await this.api('query', { connectionString: this.cs, database: this.database, sql });
+      if (!res.ok) { this._pendingError = res.error || 'Insert failed'; break; }
+      this._pendingRows.shift();
+    }
+    if (this._pendingError) this.renderResults();
+    else this.loadData();
   }
 
   // Opens a modal to edit every column of a row; Save runs an UPDATE for the
@@ -854,7 +984,9 @@ class TableDetails extends HTMLElement {
       save.disabled = cancel.disabled = true;
       const res = await this.api('query', { connectionString: this.cs, database: this.database, sql });
       if (res.ok) {
+        const oldKey = this.rowKey(row);
         Object.keys(inputs).forEach(col => { row[col] = inputs[col].value === '' ? null : inputs[col].value; });
+        this.rekeySelection(oldKey, row);
         dialog.close();
         this.loadData();
       } else {
@@ -1127,7 +1259,8 @@ class TableDetails extends HTMLElement {
       return;
     }
 
-    // Non-fuzzy: highlight every contiguous occurrence of the term.
+    // Non-fuzzy: highlight every contiguous occurrence of the term (whole cell only for exact match).
+    if (this.exact && hay !== needle) { td.textContent = text; return; }
     let pos = hay.indexOf(needle);
     if (pos === -1) { td.textContent = text; return; }
     const frag = document.createDocumentFragment();
@@ -1235,7 +1368,7 @@ class TableDetails extends HTMLElement {
     };
 
     const content = document.createElement('div');
-    content.className = 'dropdown-content z-10 mt-1 w-64 rounded-box border border-base-300 bg-base-100 p-2 shadow';
+    content.className = 'dropdown-content z-50 mt-1 w-64 rounded-box border border-base-300 bg-base-100 p-2 shadow';
 
     const filter = document.createElement('input');
     filter.type = 'search';
@@ -1350,6 +1483,23 @@ class TableDetails extends HTMLElement {
       this.renderResults();
     });
     actions.appendChild(clearBtn);
+    if (this._pendingRows.length) {
+      if (this._pendingError) {
+        const err = document.createElement('span');
+        err.className = 'text-sm text-error truncate max-w-xs';
+        err.textContent = this._pendingError;
+        err.title = this._pendingError;
+        actions.appendChild(err);
+      }
+      const saveBtn = document.createElement('button');
+      saveBtn.type = 'button';
+      saveBtn.setAttribute('data-save-pending', '');
+      saveBtn.className = 'btn btn-sm btn-primary gap-1';
+      saveBtn.innerHTML = '<i data-lucide="save" class="size-4"></i>Save (' + this._pendingRows.length + ')';
+      saveBtn.title = 'Insert the duplicated rows';
+      saveBtn.addEventListener('click', () => this.savePendingRows());
+      actions.appendChild(saveBtn);
+    }
     const infoBtn = document.createElement('button');
     infoBtn.type = 'button';
     infoBtn.className = 'btn btn-sm btn-square btn-ghost';
@@ -1479,12 +1629,22 @@ class TableDetails extends HTMLElement {
     target.appendChild(results);
   }
 
+  // SQL Server max_length is in bytes (-1 = MAX); n-types use 2 bytes per char.
+  _typeLabel(col) {
+    const t = String(col.type || '');
+    const lower = t.toLowerCase();
+    if (col.maxLength == null || !/^(n?varchar|n?char|varbinary|binary)$/.test(lower)) return t;
+    if (col.maxLength === -1) return `${t}(max)`;
+    const len = lower.startsWith('n') ? col.maxLength / 2 : col.maxLength;
+    return `${t}(${len})`;
+  }
+
   // Structure columns, each with a stable key and a value accessor used for
   // both the per-column filter and sorting.
   structDefs() {
     return [
       { key: 'name', label: 'Column', text: col => col.name || '' },
-      { key: 'type', label: 'Type', text: col => col.type || '' },
+      { key: 'type', label: 'Type', text: col => this._typeLabel(col) },
       { key: 'nullable', label: 'Nullable', text: col => (col.isNullable ? 'YES' : 'NO') },
       { key: 'keys', label: 'Key', text: col => [
         col.isPrimaryKey ? 'PK' : '',
@@ -1544,7 +1704,7 @@ class TableDetails extends HTMLElement {
       const name = document.createElement('td');
       name.textContent = col.name;
       const type = document.createElement('td');
-      type.textContent = col.type;
+      type.textContent = this._typeLabel(col);
       const nullable = document.createElement('td');
       nullable.textContent = col.isNullable ? 'YES' : 'NO';
       const key = document.createElement('td');
