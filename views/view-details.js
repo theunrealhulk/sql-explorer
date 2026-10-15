@@ -17,6 +17,7 @@ class ViewDetails extends HTMLElement {
   get database() { return this.getAttribute('database') || ''; }
   get schema() { return this.getAttribute('schema') || ''; }
   get view() { return this.getAttribute('view') || ''; }
+  get tabId() { return this.getAttribute('tab-id') || ''; }
 
   // Which tabs to render. Defaults to Data + Query; a comma-separated `tabs`
   // attribute (e.g. tabs="Query") restricts them — used for stored procedures,
@@ -48,7 +49,7 @@ class ViewDetails extends HTMLElement {
 
   render() {
     const allowed = this.allowedTabs;
-    const saved = localStorage.getItem('view-tab') || 'Data';
+    const saved = localStorage.getItem(window.tabKey(this.tabId, 'view-tab')) || 'Data';
     const active = allowed.includes(saved) ? saved : allowed[0];
     const panel = 'tab-content bg-base-100 border-base-300 p-4';
     const tab = (label, name) =>
@@ -67,7 +68,7 @@ class ViewDetails extends HTMLElement {
         '</div>';
       this.querySelectorAll('input[role="tab"]').forEach(input => {
         input.addEventListener('change', () => {
-          if (input.checked) localStorage.setItem('view-tab', input.getAttribute('aria-label'));
+          if (input.checked) localStorage.setItem(window.tabKey(this.tabId, 'view-tab'), input.getAttribute('aria-label'));
           requestAnimationFrame(() => window.pinScrollAreas(this));
         });
       });
@@ -103,6 +104,7 @@ class ViewDetails extends HTMLElement {
     target.innerHTML = '';
     const el = document.createElement('table-details');
     el.setAttribute('cs', this.cs);
+    el.setAttribute('tab-id', this.tabId);
     el.setAttribute('database', this.database);
     el.setAttribute('schema', this.schema);
     el.setAttribute('table', this.view);
