@@ -71,7 +71,7 @@ export class DatabaseController {
   }
 
   static async data(req: Request, res: Response): Promise<void> {
-    const { connectionString, database, schema, table, page, pageSize, search, fuzzy, caseSensitive, columnFilters, sortColumn, sortDir } = req.body;
+    const { connectionString, database, schema, table, page, pageSize, search, fuzzy, caseSensitive, exact, columnFilters, sortColumn, sortDir } = req.body;
     try {
       const result = await getModel(connectionString).getTableData(
         connectionString,
@@ -85,7 +85,8 @@ export class DatabaseController {
         !!caseSensitive,
         columnFilters || {},
         sortColumn || '',
-        sortDir || ''
+        sortDir || '',
+        !!exact
       );
       res.json({ ok: true, ...result });
     } catch (err) {
