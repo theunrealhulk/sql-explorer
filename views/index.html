@@ -344,6 +344,57 @@ let tabs = [];             // [{ id, cs, context: { db, name, kind } | null, typ
 let activeTabId = null;
 let tabSeq = 0;
 
+// Saved UI state (active sub-tab, view modes, filters, SQL, relations) is scoped per top-level tab.
+window.tabKey = (tabId, key) => 'tab:' + tabId + ':' + key;
+
+// Moves legacy db-scoped state into every saved tab showing that db (runs before
+// the deferred component scripts so they only ever see tab-scoped keys).
+(function migrateDbStateToTabs() {
+  try {
+    const saved = JSON.parse(localStorage.getItem('sql-explorer-profiles') || 'null');
+    const savedTabs = (saved && Array.isArray(saved.profiles)) ? saved.profiles.flatMap(p => p.tabs || []) : [];
+    if (!savedTabs.length) return;
+    const globalKeys = ['db-tab', 'table-tab', 'view-tab', 'data-view', 'sql-result-view'];
+    const owns = (k, db) => k === 'sql-explorer-dbtables:' + db ||
+      k.startsWith('sql-explorer-tablestate:' + db + '.') ||
+      k.startsWith('sql-explorer-selection:' + db + '.') ||
+      k.startsWith('sql-tab:' + db + ':');
+    const moved = new Set();
+    const copy = (id, k) => {
+      const nk = window.tabKey(id, k);
+      if (localStorage.getItem(nk) == null) localStorage.setItem(nk, localStorage.getItem(k));
+      moved.add(k);
+    };
+    const keys = Object.keys(localStorage).filter(k => !k.startsWith('tab:'));
+    savedTabs.forEach(t => {
+      keys.filter(k => globalKeys.includes(k)).forEach(k => copy(t.id, k));
+      const db = t.context && t.context.db;
+      if (db) keys.filter(k => owns(k, db)).forEach(k => copy(t.id, k));
+    });
+    moved.forEach(k => localStorage.removeItem(k));
+
+    const rel = JSON.parse(localStorage.getItem('sql-explorer-relstate') || 'null');
+    if (rel) {
+      let changed = false;
+      Object.keys(rel).filter(db => !db.startsWith('tab:')).forEach(db => {
+        const owners = savedTabs.filter(t => t.context && t.context.db === db);
+        if (!owners.length) return;
+        owners.forEach(t => { const nk = window.tabKey(t.id, db); if (!rel[nk]) rel[nk] = rel[db]; });
+        delete rel[db];
+        changed = true;
+      });
+      if (changed) localStorage.setItem('sql-explorer-relstate', JSON.stringify(rel));
+    }
+  } catch (e) { /* ignore corrupt storage */ }
+})();
+
+// Drops every saved state entry belonging to a tab (closed or deleted).
+function clearTabState(id) {
+  const prefix = window.tabKey(id, '');
+  Object.keys(localStorage).filter(k => k.startsWith(prefix)).forEach(k => localStorage.removeItem(k));
+  if (typeof clearTabRelState === 'function') clearTabRelState(prefix);
+}
+
 function activeTab() { return tabs.find(t => t.id === activeTabId) || null; }
 // Connection string of the active tab (empty string when none).
 function activeCs() { const t = activeTab(); return (t && t.cs) || ''; }
@@ -620,6 +671,7 @@ function closeTab(id) {
   const idx = tabs.findIndex(t => t.id === id);
   if (idx === -1) return;
   tabs.splice(idx, 1);
+  clearTabState(id);
   if (activeTabId === id) {
     const next = tabs[idx] || tabs[idx - 1] || tabs[0];
     activeTabId = next.id;
@@ -885,6 +937,7 @@ function showTableDetails(db, table) {
   host.innerHTML = '';
   const el = document.createElement('table-details');
   el.setAttribute('cs', CS);
+  el.setAttribute('tab-id', activeTabId);
   el.setAttribute('database', db);
   el.setAttribute('schema', table.schemaName || 'dbo');
   el.setAttribute('table', table.name);
@@ -1025,7 +1078,7 @@ function showServerSql() {
   serverSqlActive = true;
   host.innerHTML = '';
   const db = (dbStats[0] && dbStats[0].name) || 'master';
-  window.SqlScratchTab.mount(host, { cs: CS, database: db });
+  window.SqlScratchTab.mount(host, { cs: CS, database: db, tabId: activeTabId });
 }
 
 // Queries the server for tables whose name matches `term` across every database
@@ -1348,6 +1401,7 @@ function showViewDetails(db, view) {
   host.innerHTML = '';
   const el = document.createElement('view-details');
   el.setAttribute('cs', CS);
+  el.setAttribute('tab-id', activeTabId);
   el.setAttribute('database', db);
   el.setAttribute('schema', view.schemaName || 'dbo');
   el.setAttribute('view', view.name);
@@ -1362,6 +1416,7 @@ function showObjectDetails(db, item) {
   host.innerHTML = '';
   const el = document.createElement('view-details');
   el.setAttribute('cs', CS);
+  el.setAttribute('tab-id', activeTabId);
   el.setAttribute('database', db);
   el.setAttribute('schema', item.schemaName || '');
   el.setAttribute('view', item.name);
@@ -1377,6 +1432,7 @@ function showDbDetails(db) {
   host.innerHTML = '';
   const el = document.createElement('db-details');
   el.setAttribute('cs', CS);
+  el.setAttribute('tab-id', activeTabId);
   el.setAttribute('database', db);
   host.appendChild(el);
 }
@@ -1522,8 +1578,11 @@ function openSettings() {
 // Every kind of information the app can persist, as a tree. A count of 0 just
 // means nothing of that category is currently saved.
 function settingsTree() {
-  const keys = Object.keys(localStorage);
-  const byPrefix = (p) => keys.filter(k => k.startsWith(p));
+  // Tab-scoped keys split into { tab, k } (k is the key without the tab prefix).
+  const scoped = Object.keys(localStorage)
+    .map(k => k.match(/^tab:(\d+):(.*)$/)).filter(Boolean)
+    .map(m => ({ tab: m[1], k: m[2] }));
+  const byPrefix = (p) => scoped.filter(s => s.k.startsWith(p));
   const objLen = (k, prop) => {
     try {
       const o = JSON.parse(localStorage.getItem(k) || 'null');
@@ -1535,18 +1594,21 @@ function settingsTree() {
   };
 
   const dbTablesKeys = byPrefix('sql-explorer-dbtables:');
-  const dbSqlKeys = keys.filter(k => /^sql-tab:[^:]*:db$/.test(k));
+  const dbSqlKeys = scoped.filter(s => /^sql-tab:[^:]*:db$/.test(s.k));
   const tableStateKeys = byPrefix('sql-explorer-tablestate:');
-  const tableSqlKeys = keys.filter(k => /^sql-tab:[^:]*:t:/.test(k));
+  const tableSqlKeys = scoped.filter(s => /^sql-tab:[^:]*:t:/.test(s.k));
 
   const dbSet = new Set();
-  dbTablesKeys.forEach(k => dbSet.add(k.slice('sql-explorer-dbtables:'.length)));
-  try { const o = JSON.parse(localStorage.getItem('sql-explorer-relstate') || 'null'); if (o) Object.keys(o).forEach(d => dbSet.add(d)); } catch (e) { /* ignore */ }
-  dbSqlKeys.forEach(k => { const m = k.match(/^sql-tab:([^:]*):db$/); if (m) dbSet.add(m[1]); });
+  dbTablesKeys.forEach(s => dbSet.add(s.tab + '|' + s.k.slice('sql-explorer-dbtables:'.length)));
+  try {
+    const o = JSON.parse(localStorage.getItem('sql-explorer-relstate') || 'null');
+    if (o) Object.keys(o).forEach(d => { const m = d.match(/^tab:(\d+):(.*)$/); if (m) dbSet.add(m[1] + '|' + m[2]); });
+  } catch (e) { /* ignore */ }
+  dbSqlKeys.forEach(s => { const m = s.k.match(/^sql-tab:([^:]*):db$/); if (m) dbSet.add(s.tab + '|' + m[1]); });
 
   const tableSet = new Set();
-  tableStateKeys.forEach(k => tableSet.add(k.slice('sql-explorer-tablestate:'.length)));
-  tableSqlKeys.forEach(k => { const m = k.match(/^sql-tab:([^:]*):t:(.+)$/); if (m) tableSet.add(m[1] + '.' + m[2]); });
+  tableStateKeys.forEach(s => tableSet.add(s.tab + '|' + s.k.slice('sql-explorer-tablestate:'.length)));
+  tableSqlKeys.forEach(s => { const m = s.k.match(/^sql-tab:([^:]*):t:(.+)$/); if (m) tableSet.add(s.tab + '|' + m[1] + '.' + m[2]); });
 
   // Total open tabs across all engine profiles.
   const profileTabCount = (() => {
@@ -1617,11 +1679,11 @@ function engineTitle(key) {
 
 // Tables (schema.table) under a database that have any saved tab state, each
 // with the list of saved sub-tabs (Data / Structure / Relations / SQL).
-function settingsTableNodes(db) {
+function settingsTableNodes(tabId, db) {
   const map = {};
   const ensure = (st) => (map[st] = map[st] || { tabs: [], keys: {} });
-  const statePrefix = 'sql-explorer-tablestate:' + db + '.';
-  const sqlPrefix = 'sql-tab:' + db + ':t:';
+  const statePrefix = window.tabKey(tabId, 'sql-explorer-tablestate:' + db + '.');
+  const sqlPrefix = window.tabKey(tabId, 'sql-tab:' + db + ':t:');
   Object.keys(localStorage).forEach(k => {
     if (k.startsWith(statePrefix)) {
       const st = k.slice(statePrefix.length);
@@ -1629,7 +1691,7 @@ function settingsTableNodes(db) {
       try {
         const s = JSON.parse(localStorage.getItem(k) || '{}');
         const hasData = (s.hidden && s.hidden.length) || (s.filters && Object.keys(s.filters).length) ||
-          s.sortCol || s.search || s.fuzzy || s.caseSensitive ||
+          s.sortCol || s.search || s.fuzzy || s.caseSensitive || s.exact ||
           (s.jsonCollapsed && s.jsonCollapsed.length) || s.jsonSearch;
         const hasStruct = (s.structFilters && Object.keys(s.structFilters).length) || s.structSortCol;
         if (hasData && !node.tabs.includes('Data')) node.tabs.push('Data');
@@ -1667,25 +1729,26 @@ function settingsTableNodes(db) {
 }
 
 // The db-level saved items shown under a tab's database name.
-function settingsDbChildren(db) {
+function settingsDbChildren(tabId, db) {
   const out = [];
-  const tableNodes = settingsTableNodes(db);
+  const tableNodes = settingsTableNodes(tabId, db);
   if (tableNodes.length) {
     const tableKeys = tableNodes.reduce((acc, n) => acc.concat(n.keys), []);
     out.push({ label: 'Tables', count: tableNodes.length, keys: tableKeys, children: tableNodes });
   }
-  const dbSqlKey = 'sql-tab:' + db + ':db';
+  const dbSqlKey = window.tabKey(tabId, 'sql-tab:' + db + ':db');
   if (localStorage.getItem(dbSqlKey)) {
     const keys = [dbSqlKey];
     if (localStorage.getItem(dbSqlKey + ':result') != null) keys.push(dbSqlKey + ':result');
     out.push({ label: 'SQL', keys });
   }
-  const dbTablesKey = 'sql-explorer-dbtables:' + db;
+  const dbTablesKey = window.tabKey(tabId, 'sql-explorer-dbtables:' + db);
   if (localStorage.getItem(dbTablesKey)) out.push({ label: 'Tables list', keys: [dbTablesKey] });
   try {
     const rel = JSON.parse(localStorage.getItem('sql-explorer-relstate') || 'null');
-    // Relations live in a shared object keyed by db; deletion prunes just this db.
-    if (rel && rel[db]) out.push({ label: 'Relations', relDb: db });
+    // Relations live in a shared object keyed by tab + db; deletion prunes just this entry.
+    const relKey = window.tabKey(tabId, db);
+    if (rel && rel[relKey]) out.push({ label: 'Relations', relDb: relKey });
   } catch (e) { /* ignore */ }
   return out;
 }
@@ -1701,7 +1764,7 @@ function settingsProfilesTree() {
     profileEngine: p.engine,
     children: (p.tabs || []).map(t => {
       const db = (t.context && t.context.db) || null;
-      return { label: db || 'Server', dbName: db, tabId: t.id, profileEngine: p.engine, children: db ? settingsDbChildren(db) : [] };
+      return { label: db || 'Server', dbName: db, tabId: t.id, profileEngine: p.engine, children: db ? settingsDbChildren(t.id, db) : [] };
     }),
   }));
 }
@@ -1799,7 +1862,9 @@ function deleteSettingsNode(node) {
 
 // Removes an entire engine profile (and its tabs) from sql-explorer-profiles.
 function removeProfileFromStore(engine) {
-  tabs = tabs.filter(t => (t.cs ? detectEngine(t.cs).key : 'new') !== engine);
+  const inEngine = (t) => (t.cs ? detectEngine(t.cs).key : 'new') === engine;
+  tabs.filter(inEngine).forEach(t => clearTabState(t.id));
+  tabs = tabs.filter(t => !inEngine(t));
   if (!tabs.length) tabs = [{ id: ++tabSeq, cs: '', context: null, type: null }];
   if (!tabs.some(t => t.id === activeTabId)) activeTabId = tabs[0].id;
   saveTabs();
@@ -1808,6 +1873,7 @@ function removeProfileFromStore(engine) {
 // Removes a single tab by id from the runtime tabs and persisted profiles.
 function removeTabFromStore(id) {
   tabs = tabs.filter(t => t.id !== id);
+  clearTabState(id);
   if (!tabs.length) tabs = [{ id: ++tabSeq, cs: '', context: null, type: null }];
   if (!tabs.some(t => t.id === activeTabId)) activeTabId = tabs[0].id;
   saveTabs();
