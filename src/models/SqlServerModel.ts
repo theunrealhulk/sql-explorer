@@ -100,6 +100,8 @@ export interface ColumnInfo {
   isPrimaryKey: boolean;
   isForeignKey: boolean;
   isUnique: boolean;
+  // Identity / computed / rowversion: the database supplies the value on insert.
+  isGenerated?: boolean;
 }
 
 export interface TableData {
@@ -558,7 +560,8 @@ export class SqlServerModel {
                c.is_nullable AS isNullable,
                CAST(CASE WHEN ic.column_id IS NOT NULL THEN 1 ELSE 0 END AS bit) AS isPrimaryKey,
                CAST(CASE WHEN fkc.parent_column_id IS NOT NULL THEN 1 ELSE 0 END AS bit) AS isForeignKey,
-               CAST(CASE WHEN uq.column_id IS NOT NULL THEN 1 ELSE 0 END AS bit) AS isUnique
+               CAST(CASE WHEN uq.column_id IS NOT NULL THEN 1 ELSE 0 END AS bit) AS isUnique,
+               CAST(CASE WHEN c.is_identity = 1 OR c.is_computed = 1 OR t.name IN ('timestamp', 'rowversion') THEN 1 ELSE 0 END AS bit) AS isGenerated
         FROM ${qid(database)}.sys.columns c
         JOIN ${qid(database)}.sys.types t
           ON t.user_type_id = c.user_type_id
@@ -817,7 +820,8 @@ export class SqlServerModel {
     caseSensitive = false,
     columnFilters: Record<string, string> = {},
     sortColumn = '',
-    sortDir = ''
+    sortDir = '',
+    exact = false
   ): Promise<TableData> {
     const pool = await getPool(connectionString);
     try {
@@ -855,9 +859,11 @@ export class SqlServerModel {
 
       if (term && realCols.length) {
         const collation = caseSensitive ? 'Latin1_General_CS_AS' : 'Latin1_General_CI_AS';
-        const pattern = fuzzy
-          ? '%' + [...term].map(escLike).join('%') + '%'
-          : '%' + escLike(term) + '%';
+        const pattern = exact
+          ? escLike(term)
+          : fuzzy
+            ? '%' + [...term].map(escLike).join('%') + '%'
+            : '%' + escLike(term) + '%';
         inputs.push({ name: 'search', value: pattern });
         const conds = realCols.map(
           c => `TRY_CONVERT(NVARCHAR(MAX), ${qid(c)}) COLLATE ${collation} LIKE @search`
