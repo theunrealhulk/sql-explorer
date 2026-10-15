@@ -40,6 +40,12 @@ function persistRelState() {
   } catch (_) { /* ignore quota/serialisation errors */ }
 }
 
+// Forgets relations state for every db under a tab-key prefix (tab closed).
+function clearTabRelState(prefix) {
+  for (const k of [...DB_REL_STATE.keys()]) if (k.startsWith(prefix)) DB_REL_STATE.delete(k);
+  persistRelState();
+}
+
 class DbDetails extends HTMLElement {
   constructor() {
     super();
@@ -56,13 +62,15 @@ class DbDetails extends HTMLElement {
 
   get cs() { return this.getAttribute('cs') || ''; }
   get database() { return this.getAttribute('database') || ''; }
+  get tabId() { return this.getAttribute('tab-id') || ''; }
+  storeKey(k) { return window.tabKey(this.tabId, k); }
 
   connectedCallback() {
     this.renderShell();
     this.loadTablesState();
     this.buildTablesPanel();
     this.loadTables();
-    if ((localStorage.getItem('db-tab') || 'Tables') === 'Relations') this.loadRelations();
+    if ((localStorage.getItem(this.storeKey('db-tab')) || 'Tables') === 'Relations') this.loadRelations();
   }
 
   disconnectedCallback() {
@@ -95,7 +103,7 @@ class DbDetails extends HTMLElement {
 
   // Persist the Tables tab's filter/sort/pagination per database so the view is
   // restored after a full page refresh.
-  tablesStateKey() { return 'sql-explorer-dbtables:' + this.database; }
+  tablesStateKey() { return this.storeKey('sql-explorer-dbtables:' + this.database); }
 
   loadTablesState() {
     try {
@@ -129,7 +137,7 @@ class DbDetails extends HTMLElement {
 
   renderShell() {
     const panel = 'tab-content bg-base-100 border-base-300 p-4';
-    const saved = localStorage.getItem('db-tab') || 'Tables';
+    const saved = localStorage.getItem(this.storeKey('db-tab')) || 'Tables';
     const tabs = ['Tables', 'Relations', 'SQL'];
     const active = tabs.includes(saved) ? saved : 'Tables';
     const tab = (label, panelName, body) =>
@@ -146,7 +154,7 @@ class DbDetails extends HTMLElement {
       input.addEventListener('change', () => {
         if (!input.checked) return;
         const label = input.getAttribute('aria-label');
-        localStorage.setItem('db-tab', label);
+        localStorage.setItem(this.storeKey('db-tab'), label);
         if (label === 'Relations' && !this._relLoaded) this.loadRelations();
         if (label === 'SQL') this.loadSqlTab();
         requestAnimationFrame(() => window.pinScrollAreas(this));
@@ -182,7 +190,7 @@ class DbDetails extends HTMLElement {
     const target = this.panel('sql');
     if (!target) return;
     this._sqlTab = true;
-    window.SqlScratchTab.mount(target, { cs: this.cs, database: this.database })
+    window.SqlScratchTab.mount(target, { cs: this.cs, database: this.database, tabId: this.tabId })
       .then(ctrl => { this._sqlCtrl = ctrl; });
   }
 
@@ -321,7 +329,7 @@ class DbDetails extends HTMLElement {
       { key: 'name', label: 'Table name' },
       { key: 'fieldCount', label: 'Fields' },
       { key: 'rowCount', label: 'Rows' },
-      { key: 'fkCount', label: 'Uses referencing tables' },
+      { key: 'fkCount', label: 'Using other tables' },
       { key: 'referencedByCount', label: 'Used by other tables' },
     ];
     this._columns = columns;
@@ -684,7 +692,7 @@ class DbDetails extends HTMLElement {
     this._multiRootNodes = new Set();
     for (const [id, n] of rootHits) if (n > 1) this._multiRootNodes.add(id);
     // Restore any previously saved expansion / search for this database.
-    const cached = DB_REL_STATE.get(this.database);
+    const cached = DB_REL_STATE.get(this.storeKey(this.database));
     this._expanded = new Set(cached && cached.expanded ? cached.expanded : []);
     if (cached && typeof cached.search === 'string') this._search = cached.search;
     this._nodePos = new Map();
@@ -699,7 +707,7 @@ class DbDetails extends HTMLElement {
       const t = d3.zoomTransform(this._relSvg.node());
       transform = { k: t.k, x: t.x, y: t.y };
     }
-    DB_REL_STATE.set(this.database, {
+    DB_REL_STATE.set(this.storeKey(this.database), {
       expanded: new Set(this._expanded),
       search: this._search || '',
       transform,
@@ -1097,7 +1105,7 @@ class DbDetails extends HTMLElement {
 
     target.appendChild(svg.node());
     // Restore a saved pan/zoom if we have one; otherwise fit on first draw.
-    const cached = DB_REL_STATE.get(this.database);
+    const cached = DB_REL_STATE.get(this.storeKey(this.database));
     if (cached && cached.transform) {
       const tr = cached.transform;
       svg.call(zoom.transform, d3.zoomIdentity.translate(tr.x, tr.y).scale(tr.k));
@@ -1410,6 +1418,7 @@ class DbDetails extends HTMLElement {
     body.innerHTML = '';
     const el = document.createElement('table-details');
     el.setAttribute('cs', this.cs);
+    el.setAttribute('tab-id', this.tabId);
     el.setAttribute('database', this.database);
     el.setAttribute('schema', schema);
     el.setAttribute('table', name);
