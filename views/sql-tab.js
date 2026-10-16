@@ -4,6 +4,13 @@
 // syntax linting, plus a Run button (Ctrl/Cmd+Enter) that executes the query
 // against the active connection string + database and shows the results.
 window.SqlScratchTab = {
+  // [category, icon] in toolbar order.
+  _routineDefs: [
+    ['Functions', '<svg xmlns="http://www.w3.org/2000/svg" width="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><path d="M9 17c2 0 2.8-1 2.8-2.8V10c0-2 1-3.3 3.2-3"/><path d="M9 11.2h5.7"/></svg>'],
+    ['Stored Procedures', '<svg xmlns="http://www.w3.org/2000/svg" width="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M7 8h8"/><path d="M7 12h10"/><path d="M7 16h6"/></svg>'],
+    ['Triggers', '<svg xmlns="http://www.w3.org/2000/svg" width="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15.914 4a1.5 1.5 0 00-2.474-1.561l-9 9A1.5 1.5 0 005.5 14h4.002a.5.5 0 01.471.666L8.086 20a1.5 1.5 0 002.475 1.56l9-9A1.5 1.5 0 0018.5 10h-3.997a.5.5 0 01-.472-.667z"/></svg>'],
+  ],
+
   async mount(host, opts) {
     host.innerHTML = '';
 
@@ -99,7 +106,10 @@ window.SqlScratchTab = {
     fileInput.type = 'file';
     fileInput.accept = '.sql,text/plain';
     fileInput.className = 'hidden';
-    bar.append(runAll, runCurrent, refreshBtn, trashBtn, fontGroup, copyBtn, exportBtn, loadBtn, fileInput);
+    // Functions / stored procedures / triggers of the database (filled once loaded).
+    const routineGroup = document.createElement('div');
+    routineGroup.className = 'flex items-center gap-1';
+    bar.append(runAll, runCurrent, refreshBtn, trashBtn, routineGroup, fontGroup, copyBtn, exportBtn, loadBtn, fileInput);
     if (window.lucide) window.lucide.createIcons({ root: bar });
 
     // Editor — starts at 40% of the remaining height; user-resizable via the
@@ -342,7 +352,7 @@ window.SqlScratchTab = {
 
     const ctx = { results, sections: [], current: 0, refreshBtn, trashBtn, selectedRow: null, opts, view, editMeta: null };
     // Result view mode: 'table' (default) or 'json'. Persisted across mounts.
-    ctx.viewMode = localStorage.getItem(window.tabKey(opts.tabId, 'sql-result-view')) === 'json' ? 'json' : 'table';
+    ctx.viewMode = localStorage.getItem('sql-result-view') === 'json' ? 'json' : 'table';
     ctx.lastResult = null;
     // Per-result-set filter/sort state (rebuilt on each render, persisted so it
     // survives refreshes/remounts alongside the cached result).
@@ -376,7 +386,7 @@ window.SqlScratchTab = {
     const setViewMode = (mode) => {
       if (mode === ctx.viewMode) return;
       ctx.viewMode = mode;
-      try { localStorage.setItem(window.tabKey(opts.tabId, 'sql-result-view'), mode); } catch (e) { /* ignore */ }
+      try { localStorage.setItem('sql-result-view', mode); } catch (e) { /* ignore */ }
       vertical = mode === 'json';
       applyOrientation();
       updateViewButtons();
@@ -443,6 +453,74 @@ window.SqlScratchTab = {
     const observer = new MutationObserver(() => window.SqlEditor.setDark(view, isDark()));
     observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
 
+    // Routine buttons: each opens a filterable list; picking one shows its definition in a modal.
+    const openDefinition = async (item, cat, svg) => {
+      try {
+        const res = await fetch('/api/view-definition', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ connectionString: opts.cs, database: opts.database, schema: item.schemaName || '', view: item.name }),
+        });
+        const d = await res.json();
+        if (!d || !d.ok) { this._showError(results, (d && d.error) || 'Failed to load definition.'); return; }
+        this._openDefinitionModal(ctx, item, cat, svg, d.definition || '');
+      } catch (e) {
+        this._showError(results, (e && e.message) || 'Failed to load definition.');
+      }
+    };
+    const closeRoutineMenus = (except) => routineGroup.querySelectorAll('details').forEach(dd => { if (dd !== except) dd.open = false; });
+    const onRoutineOutside = (e) => { if (!routineGroup.contains(e.target)) closeRoutineMenus(null); };
+    document.addEventListener('mousedown', onRoutineOutside);
+    const renderRoutines = (cats) => {
+      routineGroup.innerHTML = '';
+      this._routineDefs.forEach(([cat, svg]) => {
+        const items = (cats && cats[cat]) || [];
+        if (!items.length) return;
+        const dd = document.createElement('details');
+        dd.className = 'dropdown';
+        const sum = document.createElement('summary');
+        sum.className = 'btn btn-sm btn-ghost gap-1 px-2';
+        sum.title = cat;
+        sum.innerHTML = svg;
+        const badge = document.createElement('span');
+        badge.className = 'badge badge-xs badge-neutral';
+        badge.textContent = String(items.length);
+        sum.appendChild(badge);
+        const panel = document.createElement('div');
+        panel.className = 'dropdown-content z-50 mt-1 w-72 rounded-box border border-base-300 bg-base-100 p-2 shadow';
+        const filter = document.createElement('input');
+        filter.type = 'search';
+        filter.className = 'input input-xs input-bordered w-full mb-1';
+        filter.placeholder = 'Filter ' + cat.toLowerCase() + '…';
+        const list = document.createElement('ul');
+        list.className = 'menu menu-xs w-full max-h-72 overflow-auto flex-nowrap p-0';
+        const renderList = () => {
+          list.innerHTML = '';
+          const q = filter.value.trim().toLowerCase();
+          items.filter(it => !q || it.name.toLowerCase().includes(q)).forEach(it => {
+            const li = document.createElement('li');
+            const a = document.createElement('a');
+            a.textContent = (it.schemaName ? it.schemaName + '.' : '') + it.name;
+            a.title = 'Show definition';
+            a.addEventListener('click', () => { dd.open = false; openDefinition(it, cat, svg); });
+            li.appendChild(a);
+            list.appendChild(li);
+          });
+        };
+        filter.addEventListener('input', renderList);
+        renderList();
+        panel.append(filter, list);
+        dd.append(sum, panel);
+        dd.addEventListener('toggle', () => { if (dd.open) { closeRoutineMenus(dd); filter.focus(); } });
+        routineGroup.appendChild(dd);
+      });
+    };
+    fetch('/api/routines', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ connectionString: opts.cs, database: opts.database }),
+    }).then(r => r.json()).then(d => { if (d && d.ok) renderRoutines(d.categories); }).catch(() => {});
+
     // Load the completion schema (tables/columns) for the active database.
     try {
       const res = await fetch('/api/schema', {
@@ -474,6 +552,7 @@ window.SqlScratchTab = {
         window.removeEventListener('pointermove', onMove);
         window.removeEventListener('pointerup', onUp);
         observer.disconnect();
+        document.removeEventListener('mousedown', onRoutineOutside);
         if (ctx.jsonEditors) { ctx.jsonEditors.forEach(e => { try { e.destroy(); } catch (x) { /* ignore */ } }); ctx.jsonEditors = []; }
         view.destroy();
       },
@@ -516,6 +595,89 @@ window.SqlScratchTab = {
     alert.className = 'alert alert-error alert-soft';
     alert.textContent = message || 'Query failed.';
     results.appendChild(alert);
+  },
+
+  // Read-only modal with a routine's definition, plus Copy and Insert-into-editor actions.
+  _openDefinitionModal(ctx, item, cat, svg, sql) {
+    const isDark = () => document.documentElement.getAttribute('data-theme') === 'dark';
+    const dialog = document.createElement('dialog');
+    dialog.className = 'modal';
+    const box = document.createElement('div');
+    box.className = 'modal-box w-11/12 max-w-5xl';
+
+    const title = document.createElement('h3');
+    title.className = 'text-lg font-bold mb-3 flex items-center gap-2';
+    const ico = document.createElement('span');
+    ico.innerHTML = svg;
+    const name = document.createElement('span');
+    name.textContent = (item.schemaName ? item.schemaName + '.' : '') + item.name;
+    const kind = document.createElement('span');
+    kind.className = 'badge badge-sm badge-ghost';
+    kind.textContent = cat;
+    title.append(ico, name, kind);
+    box.appendChild(title);
+
+    const host = document.createElement('div');
+    host.className = 'max-h-[70vh] overflow-auto rounded-lg border border-base-300 bg-base-200';
+    box.appendChild(host);
+    let editor = null;
+    if (!sql.trim()) {
+      host.className += ' p-4 text-base-content/60';
+      host.textContent = 'No definition available (it may be encrypted).';
+    } else if (window.SqlEditor && window.SqlEditor.create) {
+      editor = window.SqlEditor.create(host, sql, isDark());
+    } else {
+      const pre = document.createElement('pre');
+      pre.className = 'p-4 text-sm';
+      pre.textContent = sql;
+      host.appendChild(pre);
+    }
+
+    const action = document.createElement('div');
+    action.className = 'modal-action';
+    const copyBtn = document.createElement('button');
+    copyBtn.type = 'button';
+    copyBtn.className = 'btn btn-ghost gap-1';
+    copyBtn.innerHTML = '<i data-lucide="clipboard" class="size-4"></i>Copy';
+    copyBtn.disabled = !sql.trim();
+    copyBtn.addEventListener('click', () => {
+      navigator.clipboard.writeText(sql).then(() => {
+        copyBtn.innerHTML = '<i data-lucide="check" class="size-4"></i>Copied';
+        if (window.lucide) window.lucide.createIcons({ root: copyBtn });
+      }).catch(() => {});
+    });
+    const insertBtn = document.createElement('button');
+    insertBtn.type = 'button';
+    insertBtn.className = 'btn btn-primary gap-1';
+    insertBtn.innerHTML = '<i data-lucide="text-cursor-input" class="size-4"></i>Insert into editor';
+    insertBtn.disabled = !sql.trim() || !ctx.view;
+    insertBtn.addEventListener('click', () => {
+      const cur = window.SqlEditor.getValue(ctx.view);
+      const text = sql.replace(/\r\n/g, '\n').trim();
+      window.SqlEditor.setValue(ctx.view, cur.trim() ? cur.replace(/\s*$/, '') + '\n\n' + text : text);
+      if (ctx.persist) ctx.persist();
+      dialog.close();
+    });
+    const closeBtn = document.createElement('button');
+    closeBtn.type = 'button';
+    closeBtn.className = 'btn';
+    closeBtn.textContent = 'Close';
+    closeBtn.addEventListener('click', () => dialog.close());
+    action.append(copyBtn, insertBtn, closeBtn);
+    box.appendChild(action);
+
+    dialog.appendChild(box);
+    const backdrop = document.createElement('form');
+    backdrop.method = 'dialog';
+    backdrop.className = 'modal-backdrop';
+    const bd = document.createElement('button');
+    bd.textContent = 'close';
+    backdrop.appendChild(bd);
+    dialog.appendChild(backdrop);
+    document.body.appendChild(dialog);
+    dialog.addEventListener('close', () => { if (editor) editor.destroy(); dialog.remove(); });
+    if (window.lucide) window.lucide.createIcons({ root: box });
+    dialog.showModal();
   },
 
   // Splits a SQL batch into individual statements on top-level semicolons,
@@ -960,7 +1122,7 @@ window.SqlScratchTab = {
     const scope = opts && opts.table
       ? 't:' + (opts.schema || 'dbo') + '.' + opts.table
       : 'db';
-    return window.tabKey(opts && opts.tabId, 'sql-tab:' + db + ':' + scope);
+    return 'sql-tab:' + db + ':' + scope;
   },
 
   // Fetches (and caches per table) the column types + FK option lists needed to
