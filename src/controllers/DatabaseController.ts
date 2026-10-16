@@ -30,6 +30,16 @@ export class DatabaseController {
     }
   }
 
+  static async routines(req: Request, res: Response): Promise<void> {
+    const { connectionString, database } = req.body;
+    try {
+      const categories = await getModel(connectionString).listRoutines(connectionString, database);
+      res.json({ ok: true, categories });
+    } catch (err) {
+      res.status(400).json({ ok: false, error: (err as Error).message });
+    }
+  }
+
   static async tables(req: Request, res: Response): Promise<void> {
     const { connectionString, database, sort, dir, page, pageSize, filter, columnFilters, search } = req.body;
     try {
@@ -71,7 +81,7 @@ export class DatabaseController {
   }
 
   static async data(req: Request, res: Response): Promise<void> {
-    const { connectionString, database, schema, table, page, pageSize, search, fuzzy, caseSensitive, exact, columnFilters, sortColumn, sortDir } = req.body;
+    const { connectionString, database, schema, table, page, pageSize, search, fuzzy, caseSensitive, columnFilters, sortColumn, sortDir } = req.body;
     try {
       const result = await getModel(connectionString).getTableData(
         connectionString,
@@ -85,8 +95,7 @@ export class DatabaseController {
         !!caseSensitive,
         columnFilters || {},
         sortColumn || '',
-        sortDir || '',
-        !!exact
+        sortDir || ''
       );
       res.json({ ok: true, ...result });
     } catch (err) {
