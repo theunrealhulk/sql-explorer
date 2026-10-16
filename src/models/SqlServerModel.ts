@@ -100,8 +100,6 @@ export interface ColumnInfo {
   isPrimaryKey: boolean;
   isForeignKey: boolean;
   isUnique: boolean;
-  // Identity / computed / rowversion: the database supplies the value on insert.
-  isGenerated?: boolean;
 }
 
 export interface TableData {
@@ -123,6 +121,17 @@ export interface ObjectCategories {
   'Stored Procedures': NamedObject[];
   Functions: NamedObject[];
   Triggers: NamedObject[];
+}
+
+export interface RoutineInfo {
+  name: string;
+  schemaName: string;
+}
+
+export interface RoutineCategories {
+  'Stored Procedures': RoutineInfo[];
+  Functions: RoutineInfo[];
+  Triggers: RoutineInfo[];
 }
 
 export interface DatabaseStat {
@@ -274,6 +283,30 @@ export class SqlServerModel {
             `SELECT name FROM [${database}].sys.triggers WHERE is_ms_shipped = 0 ORDER BY name`
           )
         ).map((name) => ({ name })),
+      };
+    } finally {
+      await pool.close();
+    }
+  }
+
+  // Programmable objects only (cheap: no table/view statistics).
+  static async listRoutines(connectionString: string, database: string): Promise<RoutineCategories> {
+    const pool = await getPool(connectionString);
+    try {
+      const rows = (
+        await pool.request().query<{ name: string; schemaName: string; type: string }>(`
+        SELECT o.name AS name, s.name AS schemaName, RTRIM(o.type) AS type
+        FROM ${qid(database)}.sys.objects o
+        JOIN ${qid(database)}.sys.schemas s ON s.schema_id = o.schema_id
+        WHERE o.is_ms_shipped = 0 AND o.type IN ('P', 'FN', 'IF', 'TF', 'TR')
+        ORDER BY o.name`)
+      ).recordset;
+      const pick = (types: string[]): RoutineInfo[] =>
+        rows.filter((r) => types.includes(r.type)).map((r) => ({ name: r.name, schemaName: r.schemaName }));
+      return {
+        'Stored Procedures': pick(['P']),
+        Functions: pick(['FN', 'IF', 'TF']),
+        Triggers: pick(['TR']),
       };
     } finally {
       await pool.close();
@@ -560,8 +593,7 @@ export class SqlServerModel {
                c.is_nullable AS isNullable,
                CAST(CASE WHEN ic.column_id IS NOT NULL THEN 1 ELSE 0 END AS bit) AS isPrimaryKey,
                CAST(CASE WHEN fkc.parent_column_id IS NOT NULL THEN 1 ELSE 0 END AS bit) AS isForeignKey,
-               CAST(CASE WHEN uq.column_id IS NOT NULL THEN 1 ELSE 0 END AS bit) AS isUnique,
-               CAST(CASE WHEN c.is_identity = 1 OR c.is_computed = 1 OR t.name IN ('timestamp', 'rowversion') THEN 1 ELSE 0 END AS bit) AS isGenerated
+               CAST(CASE WHEN uq.column_id IS NOT NULL THEN 1 ELSE 0 END AS bit) AS isUnique
         FROM ${qid(database)}.sys.columns c
         JOIN ${qid(database)}.sys.types t
           ON t.user_type_id = c.user_type_id
@@ -820,8 +852,7 @@ export class SqlServerModel {
     caseSensitive = false,
     columnFilters: Record<string, string> = {},
     sortColumn = '',
-    sortDir = '',
-    exact = false
+    sortDir = ''
   ): Promise<TableData> {
     const pool = await getPool(connectionString);
     try {
@@ -859,11 +890,9 @@ export class SqlServerModel {
 
       if (term && realCols.length) {
         const collation = caseSensitive ? 'Latin1_General_CS_AS' : 'Latin1_General_CI_AS';
-        const pattern = exact
-          ? escLike(term)
-          : fuzzy
-            ? '%' + [...term].map(escLike).join('%') + '%'
-            : '%' + escLike(term) + '%';
+        const pattern = fuzzy
+          ? '%' + [...term].map(escLike).join('%') + '%'
+          : '%' + escLike(term) + '%';
         inputs.push({ name: 'search', value: pattern });
         const conds = realCols.map(
           c => `TRY_CONVERT(NVARCHAR(MAX), ${qid(c)}) COLLATE ${collation} LIKE @search`
