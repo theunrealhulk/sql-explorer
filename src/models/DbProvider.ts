@@ -3,6 +3,7 @@ import {
   ColumnInfo,
   TableData,
   ObjectCategories,
+  RoutineCategories,
   DatabaseStat,
 } from './SqlServerModel';
 
@@ -15,6 +16,8 @@ export interface DbProvider {
   listDatabaseStats(connectionString: string): Promise<DatabaseStat[]>;
 
   listObjects(connectionString: string, database: string): Promise<ObjectCategories>;
+
+  listRoutines(connectionString: string, database: string): Promise<RoutineCategories>;
 
   searchTables(
     connectionString: string,
@@ -93,7 +96,6 @@ export interface DbProvider {
     caseSensitive?: boolean,
     columnFilters?: Record<string, string>,
     sortColumn?: string,
-    sortDir?: string,
-    exact?: boolean
+    sortDir?: string
   ): Promise<TableData>;
 }
