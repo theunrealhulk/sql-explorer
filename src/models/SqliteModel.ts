@@ -4,6 +4,7 @@ import {
   ColumnInfo,
   TableData,
   ObjectCategories,
+  RoutineCategories,
   DatabaseStat,
 } from './SqlServerModel';
 
@@ -180,6 +181,23 @@ export class SqliteModel {
         'Stored Procedures': [],
         Functions: [],
         Triggers: triggerRows.map((t) => ({ name: t.name })),
+      };
+    } finally {
+      db.close();
+    }
+  }
+
+  // SQLite has no procedures or functions; only triggers are listed.
+  static async listRoutines(connectionString: string, _database: string): Promise<RoutineCategories> {
+    const db = openDb(connectionString);
+    try {
+      const triggers = db
+        .prepare(`SELECT name FROM sqlite_master WHERE type = 'trigger' ORDER BY name`)
+        .all() as { name: string }[];
+      return {
+        'Stored Procedures': [],
+        Functions: [],
+        Triggers: triggers.map((t) => ({ name: t.name, schemaName: '' })),
       };
     } finally {
       db.close();
@@ -364,7 +382,6 @@ export class SqliteModel {
           info.forEach((i) => uniqueCols.add(i.name));
         }
       }
-      const pkCount = cols.filter((c) => c.pk > 0).length;
       return cols.map((c) => ({
         name: c.name,
         type: c.type || '',
@@ -373,8 +390,6 @@ export class SqliteModel {
         isPrimaryKey: c.pk > 0,
         isForeignKey: fkCols.has(c.name),
         isUnique: uniqueCols.has(c.name) || c.pk > 0,
-        // A lone INTEGER PRIMARY KEY aliases rowid and is auto-assigned.
-        isGenerated: c.pk > 0 && pkCount === 1 && (c.type || '').toUpperCase() === 'INTEGER',
       }));
     } finally {
       db.close();
@@ -579,8 +594,7 @@ export class SqliteModel {
     caseSensitive = false,
     columnFilters: Record<string, string> = {},
     sortColumn = '',
-    sortDir = '',
-    exact = false
+    sortDir = ''
   ): Promise<TableData> {
     const db = openDb(connectionString);
     try {
@@ -600,11 +614,9 @@ export class SqliteModel {
 
       const term = (search || '').trim();
       if (term && realCols.length) {
-        const pattern = exact
-          ? escLike(term)
-          : fuzzy
-            ? '%' + [...term].map(escLike).join('%') + '%'
-            : '%' + escLike(term) + '%';
+        const pattern = fuzzy
+          ? '%' + [...term].map(escLike).join('%') + '%'
+          : '%' + escLike(term) + '%';
         // SQLite LIKE is case-insensitive for ASCII by default; use GLOB or a
         // case fold for case sensitivity.
         const conds = realCols.map((c) => {
