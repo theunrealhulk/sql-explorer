@@ -639,7 +639,14 @@ export class SqliteModel {
         const range = raw.match(/^\[\s*([^,\]]*?)\s*,\s*([^,\]]*?)\s*\]$/);
         const list = raw.match(/^\(\s*(.*?)\s*\)$/);
         const opMatch = raw.match(/^\s*(<=|>=|!=|<>|=|<|>|!)\s*(.*)$/);
-        if (range && !Number.isNaN(Number(range[1])) && !Number.isNaN(Number(range[2]))) {
+        const text = `CAST(${qid(col)} AS TEXT)`;
+        if (raw === '{null}') {
+          clauses.push(`${qid(col)} IS NULL`);
+        } else if (raw === '{empty}') {
+          clauses.push(`(${qid(col)} IS NULL OR ${text} = '')`);
+        } else if (raw === '{notempty}') {
+          clauses.push(`${text} <> ''`);
+        } else if (range && !Number.isNaN(Number(range[1])) && !Number.isNaN(Number(range[2]))) {
           clauses.push(`${qid(col)} BETWEEN ? AND ?`);
           params.push(Number(range[1]), Number(range[2]));
         } else if (list) {
@@ -656,6 +663,9 @@ export class SqliteModel {
           if (op === '!' || op === '!=') op = '<>';
           clauses.push(`${qid(col)} ${op} ?`);
           params.push(Number(opMatch[2].trim()));
+        } else if (opMatch && ['!', '!=', '<>'].includes(opMatch[1])) {
+          clauses.push(`(${qid(col)} IS NULL OR LOWER(${text}) <> LOWER(?))`);
+          params.push(opMatch[2].trim());
         } else {
           clauses.push(`LOWER(CAST(${qid(col)} AS TEXT)) LIKE LOWER(?) ESCAPE '\\'`);
           params.push('%' + escLike(raw) + '%');
