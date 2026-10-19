@@ -352,7 +352,8 @@ window.SqlScratchTab = {
 
     const ctx = { results, sections: [], current: 0, refreshBtn, trashBtn, selectedRow: null, opts, view, editMeta: null };
     // Result view mode: 'table' (default) or 'json'. Persisted across mounts.
-    ctx.viewMode = localStorage.getItem('sql-result-view') === 'json' ? 'json' : 'table';
+    const viewKey = opts && opts.tabId && window.tabKey ? window.tabKey(opts.tabId, 'sql-result-view') : 'sql-result-view';
+    ctx.viewMode = localStorage.getItem(viewKey) === 'json' ? 'json' : 'table';
     ctx.lastResult = null;
     // Per-result-set filter/sort state (rebuilt on each render, persisted so it
     // survives refreshes/remounts alongside the cached result).
@@ -368,6 +369,7 @@ window.SqlScratchTab = {
           colFilters: s.colFilters,
           sortCol: s.sortState.col,
           sortDir: s.sortState.dir,
+          hidden: [...s.hidden],
         } : null));
         localStorage.setItem(resultKey, JSON.stringify({
           d: ctx.lastResult.d,
@@ -386,7 +388,7 @@ window.SqlScratchTab = {
     const setViewMode = (mode) => {
       if (mode === ctx.viewMode) return;
       ctx.viewMode = mode;
-      try { localStorage.setItem('sql-result-view', mode); } catch (e) { /* ignore */ }
+      try { localStorage.setItem(viewKey, mode); } catch (e) { /* ignore */ }
       vertical = mode === 'json';
       applyOrientation();
       updateViewButtons();
@@ -913,20 +915,18 @@ window.SqlScratchTab = {
       const savedState = ctx._restoreFilters && ctx._restoreFilters[i];
       const sortState = { col: (savedState && savedState.sortCol) || null, dir: (savedState && savedState.sortDir) || 1 };
       const colFilters = (savedState && savedState.colFilters) ? { ...savedState.colFilters } : {};
+      const hidden = new Set(((savedState && savedState.hidden) || []).filter(c => set.columns.includes(c)));
+      const visibleCols = () => set.columns.filter(c => !hidden.has(c));
       const ths = {};
       // Register this set's state so it can be persisted after edits.
-      ctx._setStates[i] = { colFilters, sortState };
+      ctx._setStates[i] = { colFilters, sortState, hidden };
 
-      // Client-side per-column filtering of the result set. Each active filter
-      // is a case-insensitive substring match; multiple columns are ANDed.
+      // Client-side per-column filtering of the fetched rows only (same syntax as
+      // the Data tab: contains, != value, {empty}, {notempty}, {null}, =/>/< ops).
       const filterRows = (rows) => {
         const active = Object.entries(colFilters).filter(([, v]) => v !== '');
         if (!active.length) return rows;
-        return rows.filter(row => active.every(([col, val]) => {
-          const cell = row[col];
-          const s = (cell === null || cell === undefined ? '' : String(cell)).toLowerCase();
-          return s.includes(val.toLowerCase());
-        }));
+        return rows.filter(row => active.every(([col, val]) => this._matchFilter(row[col], val)));
       };
 
       // Header label mode: column name, sort arrow, and a filter toggle icon
@@ -948,7 +948,17 @@ window.SqlScratchTab = {
         fbtn.type = 'button';
         fbtn.className = 'btn btn-ghost btn-xs btn-square';
         const active = !!colFilters[c];
-        fbtn.title = active ? ('Filter: ' + colFilters[c]) : 'Filter this column';
+        th.classList.toggle('filter-col', active);
+        th.classList.toggle('filter-col-top', active);
+        if (active) {
+          const badge = document.createElement('span');
+          badge.className = 'badge badge-warning badge-sm cursor-pointer whitespace-nowrap max-w-48 truncate font-normal';
+          badge.textContent = this._describeFilter(colFilters[c]);
+          badge.title = 'Filter: ' + badge.textContent + ' (click to edit)';
+          badge.addEventListener('click', (e) => { e.stopPropagation(); showInput(th, c); });
+          left.appendChild(badge);
+        }
+        fbtn.title = active ? ('Filter: ' + this._describeFilter(colFilters[c])) : 'Filter this column';
         fbtn.innerHTML = '<i data-lucide="filter" class="size-3' + (active ? ' text-primary' : '') + '"></i>';
         fbtn.addEventListener('click', (e) => { e.stopPropagation(); showInput(th, c); });
         const right = document.createElement('span');
@@ -975,13 +985,44 @@ window.SqlScratchTab = {
       const showInput = (th, c) => {
         th.innerHTML = '';
         const inner = document.createElement('span');
-        inner.className = 'inline-flex items-center gap-1';
+        inner.className = 'inline-flex items-center gap-1 min-w-max';
         inner.addEventListener('click', (e) => e.stopPropagation());
         const input = document.createElement('input');
         input.type = 'text';
-        input.className = 'input input-xs input-bordered w-14';
+        input.className = 'input input-xs input-bordered w-40';
         input.placeholder = 'Filter…';
-        input.value = colFilters[c] || '';
+        input.title = 'Contains text, or =, >, <, >=, <= value';
+        const current = colFilters[c] || '';
+        input.value = current;
+        const apply = (val) => {
+          if (val) colFilters[c] = val; else delete colFilters[c];
+          showLabel(th, c);
+          renderRows();
+        };
+        const mode = document.createElement('select');
+        mode.className = 'select select-xs w-28';
+        [['contains', 'Contains'], ['neq', 'Not equal'], ['{empty}', 'Empty'], ['{notempty}', 'Not empty'], ['{null}', 'NULL']]
+          .forEach(([v, label]) => {
+            const o = document.createElement('option');
+            o.value = v;
+            o.textContent = label;
+            mode.appendChild(o);
+          });
+        const neq = current.match(/^(?:!=|<>|!)\s*(.*)$/);
+        if (['{empty}', '{notempty}', '{null}'].includes(current)) { mode.value = current; input.value = ''; }
+        else if (neq) { mode.value = 'neq'; input.value = neq[1]; }
+        const syncInput = () => { input.classList.toggle('hidden', mode.value.startsWith('{')); };
+        syncInput();
+        // Value-less modes apply immediately; the others wait for Enter.
+        mode.addEventListener('change', () => {
+          syncInput();
+          if (mode.value.startsWith('{')) apply(mode.value);
+          else input.focus();
+        });
+        mode.addEventListener('keydown', (e) => {
+          e.stopPropagation();
+          if (e.key === 'Escape') x.click();
+        });
         const x = document.createElement('button');
         x.type = 'button';
         x.className = 'btn btn-ghost btn-xs btn-square';
@@ -992,9 +1033,7 @@ window.SqlScratchTab = {
           if (e.key === 'Enter') {
             e.preventDefault();
             const val = input.value.trim();
-            if (val) colFilters[c] = val; else delete colFilters[c];
-            showLabel(th, c);
-            renderRows();
+            apply(mode.value === 'neq' && val ? '!=' + val : val);
           } else if (e.key === 'Escape') {
             const had = !!colFilters[c];
             delete colFilters[c];
@@ -1009,10 +1048,11 @@ window.SqlScratchTab = {
           showLabel(th, c);
           if (had) renderRows();
         });
-        inner.append(input, x);
+        inner.append(mode, input, x);
         th.appendChild(inner);
         if (window.lucide) window.lucide.createIcons({ root: th });
-        input.focus();
+        if (mode.value.startsWith('{')) mode.focus();
+        else input.focus();
       };
 
       set.columns.forEach(c => {
@@ -1030,8 +1070,12 @@ window.SqlScratchTab = {
           renderRows();
         });
         showLabel(th, c);
-        htr.appendChild(th);
       });
+      const renderHead = () => {
+        htr.innerHTML = '';
+        visibleCols().forEach(c => htr.appendChild(ths[c]));
+      };
+      renderHead();
       thead.appendChild(htr);
       table.appendChild(thead);
 
@@ -1053,21 +1097,27 @@ window.SqlScratchTab = {
       const renderRows = () => {
         if (ctx.selectRow) ctx.selectRow(null);
         tbody.innerHTML = '';
-        box.classList.toggle('filter-active-border',
-          Object.values(colFilters).some(v => v !== '' && v !== undefined));
         if (ctx.persistResult) ctx.persistResult();
         let rows = filterRows(set.rows);
         if (sortState.col) rows = rows.slice().sort(compare);
-        rows.forEach(row => {
+        rows.forEach((row, ri) => {
           const tr = document.createElement('tr');
           tr.className = 'hover:bg-base-300 cursor-pointer';
           tr._row = row;
           tr._table = rowRef;
-          set.columns.forEach(c => {
+          visibleCols().forEach(c => {
             const td = document.createElement('td');
-            td.className = 'max-w-xs break-words whitespace-normal';
+            td.className = 'max-w-xs break-words whitespace-normal' +
+              (colFilters[c] ? ' filter-col' + (ri === rows.length - 1 ? ' filter-col-bottom' : '') : '');
             const v = row[c];
-            td.textContent = v === null || v === undefined ? '' : String(v);
+            if (v === null || v === undefined) {
+              const n = document.createElement('span');
+              n.className = 'italic text-base-content/40 select-none';
+              n.textContent = 'NULL';
+              td.appendChild(n);
+            } else {
+              td.textContent = String(v);
+            }
             tr.appendChild(td);
           });
           tr.addEventListener('click', () => {
@@ -1077,6 +1127,11 @@ window.SqlScratchTab = {
         });
       };
       renderRows();
+      // Same rule as the Data tab: the column chooser only appears for wide results.
+      if (set.columns.length > 5) {
+        meta.classList.add('flex', 'items-center', 'gap-3');
+        meta.appendChild(this._columnChooser(set.columns, hidden, () => { renderHead(); renderRows(); }));
+      }
       table.appendChild(tbody);
       box.appendChild(table);
       if (window.enableCellCrosshair) window.enableCellCrosshair(table);
@@ -1114,6 +1169,110 @@ window.SqlScratchTab = {
 
   _qid(name) { return '[' + String(name).replace(/]/g, ']]') + ']'; },
 
+  // "Columns (visible/total)" dropdown with a filter box and per-column
+  // checkboxes; mutates `hidden` and calls onChange so the grid re-renders.
+  _columnChooser(columns, hidden, onChange) {
+    const dd = document.createElement('details');
+    dd.className = 'dropdown';
+    const sum = document.createElement('summary');
+    sum.className = 'btn btn-xs btn-outline';
+    const updateLabel = () => { sum.textContent = 'Columns (' + (columns.length - hidden.size) + '/' + columns.length + ')'; };
+    updateLabel();
+    const panel = document.createElement('div');
+    panel.className = 'dropdown-content z-50 mt-1 w-64 rounded-box border border-base-300 bg-base-100 p-2 shadow';
+    const filter = document.createElement('input');
+    filter.type = 'search';
+    filter.className = 'input input-xs input-bordered w-full mb-1';
+    filter.placeholder = 'Filter columns…';
+    const allLabel = document.createElement('label');
+    allLabel.className = 'flex items-center gap-2 px-1 py-1 text-sm font-semibold cursor-pointer';
+    const allCb = document.createElement('input');
+    allCb.type = 'checkbox';
+    allCb.className = 'checkbox checkbox-xs';
+    const allText = document.createElement('span');
+    allText.textContent = 'Select all';
+    allLabel.append(allCb, allText);
+    const list = document.createElement('div');
+    list.className = 'max-h-64 overflow-auto';
+    const syncAll = () => {
+      allCb.checked = hidden.size === 0;
+      allCb.indeterminate = hidden.size > 0 && hidden.size < columns.length;
+    };
+    const renderList = () => {
+      list.innerHTML = '';
+      const q = filter.value.trim().toLowerCase();
+      columns.filter(c => !q || c.toLowerCase().includes(q)).forEach(c => {
+        const l = document.createElement('label');
+        l.className = 'flex items-center gap-2 px-1 py-0.5 text-sm cursor-pointer rounded hover:bg-base-200';
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.className = 'checkbox checkbox-xs';
+        cb.checked = !hidden.has(c);
+        cb.addEventListener('change', () => {
+          if (cb.checked) hidden.delete(c); else hidden.add(c);
+          updateLabel(); syncAll(); onChange();
+        });
+        const name = document.createElement('span');
+        name.textContent = c;
+        l.append(cb, name);
+        list.appendChild(l);
+      });
+    };
+    // Unchecking "Select all" keeps the first column so the grid never ends up empty.
+    allCb.addEventListener('change', () => {
+      hidden.clear();
+      if (!allCb.checked) columns.slice(1).forEach(c => hidden.add(c));
+      updateLabel(); renderList(); syncAll(); onChange();
+    });
+    filter.addEventListener('input', renderList);
+    renderList();
+    syncAll();
+    panel.append(filter, allLabel, list);
+    dd.append(sum, panel);
+    const onDoc = (e) => { if (!dd.contains(e.target)) dd.open = false; };
+    dd.addEventListener('toggle', () => {
+      if (dd.open) { document.addEventListener('mousedown', onDoc); filter.focus(); }
+      else document.removeEventListener('mousedown', onDoc);
+    });
+    return dd;
+  },
+
+  // Human-readable form of a column filter (shown in the header badge).
+  _describeFilter(v) {
+    if (v === '{empty}') return 'is empty';
+    if (v === '{notempty}') return 'is not empty';
+    if (v === '{null}') return 'is NULL';
+    const neq = String(v).match(/^(?:!=|<>|!)\s*(.*)$/);
+    return neq ? 'not equal to "' + neq[1] + '"' : String(v);
+  },
+
+  // Tests one cell against a column filter; mirrors the Data tab's server-side semantics.
+  _matchFilter(cell, f) {
+    const isNull = cell === null || cell === undefined;
+    const s = isNull ? '' : String(cell);
+    if (f === '{null}') return isNull;
+    if (f === '{empty}') return isNull || s === '';
+    if (f === '{notempty}') return !isNull && s !== '';
+    const neq = f.match(/^(?:!=|<>|!)\s*(.*)$/);
+    if (neq) return isNull || s.toLowerCase() !== neq[1].toLowerCase();
+    const cmp = f.match(/^(>=|<=|>|<|=)\s*(.+)$/);
+    if (cmp) {
+      if (isNull) return false;
+      const a = Number(s), b = Number(cmp[2]);
+      const num = s.trim() !== '' && !Number.isNaN(a) && !Number.isNaN(b);
+      const x = num ? a : s.toLowerCase();
+      const y = num ? b : cmp[2].toLowerCase();
+      switch (cmp[1]) {
+        case '>=': return x >= y;
+        case '<=': return x <= y;
+        case '>': return x > y;
+        case '<': return x < y;
+        default: return x === y;
+      }
+    }
+    return s.toLowerCase().includes(f.toLowerCase());
+  },
+
   // Builds a localStorage key unique to the tab's context: the database, and —
   // for a table tab — the individual schema.table. This keeps each context's
   // SQL scratch contents separate and restores them after a refresh/remount.
@@ -1122,7 +1281,8 @@ window.SqlScratchTab = {
     const scope = opts && opts.table
       ? 't:' + (opts.schema || 'dbo') + '.' + opts.table
       : 'db';
-    return 'sql-tab:' + db + ':' + scope;
+    const key = 'sql-tab:' + db + ':' + scope;
+    return opts && opts.tabId && window.tabKey ? window.tabKey(opts.tabId, key) : key;
   },
 
   // Fetches (and caches per table) the column types + FK option lists needed to
