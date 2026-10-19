@@ -922,10 +922,23 @@ export class SqlServerModel {
           );
           if (clause) clauses.push(clause);
         } else {
-          inputs.push({ name: param, value: '%' + escLike(raw) + '%' });
-          clauses.push(
-            `TRY_CONVERT(NVARCHAR(MAX), ${qid(col)}) COLLATE Latin1_General_CI_AS LIKE @${param}`
-          );
+          // Special tokens from the UI: {null}, {empty}, {notempty}; "!="/"<>"/"!" prefix = not equal.
+          const text = `TRY_CONVERT(NVARCHAR(MAX), ${qid(col)})`;
+          const neq = raw.match(/^(?:!=|<>|!)\s*(.*)$/);
+          if (raw === '{null}') {
+            clauses.push(`${qid(col)} IS NULL`);
+          } else if (raw === '{empty}') {
+            // Blank-looking cells: NULL or ''.
+            clauses.push(`(${qid(col)} IS NULL OR ${text} = N'')`);
+          } else if (raw === '{notempty}') {
+            clauses.push(`${text} <> N''`);
+          } else if (neq) {
+            inputs.push({ name: param, value: neq[1] });
+            clauses.push(`(${qid(col)} IS NULL OR ${text} COLLATE Latin1_General_CI_AS <> @${param})`);
+          } else {
+            inputs.push({ name: param, value: '%' + escLike(raw) + '%' });
+            clauses.push(`${text} COLLATE Latin1_General_CI_AS LIKE @${param}`);
+          }
         }
       });
 
