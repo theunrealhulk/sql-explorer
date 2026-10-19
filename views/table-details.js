@@ -1162,7 +1162,6 @@ class TableDetails extends HTMLElement {
     const right = document.createElement('div');
     right.className = 'flex items-center gap-1';
     right.appendChild(window.makeCopyButton(c, 'Copy column name'));
-    right.appendChild(btn);
     if (active) {
       const clr = document.createElement('button');
       clr.type = 'button';
@@ -1171,6 +1170,8 @@ class TableDetails extends HTMLElement {
       clr.innerHTML = '<i data-lucide="filter-x" class="size-3 text-error"></i>';
       clr.addEventListener('click', () => { delete this._colFilters[c]; this.saveTableState(); this.page = 1; this.loadData(); });
       right.appendChild(clr);
+    } else {
+      right.appendChild(btn);
     }
     const left = document.createElement('div');
     left.className = 'flex items-center gap-2 min-w-0';
@@ -1881,7 +1882,6 @@ class TableDetails extends HTMLElement {
     const right = document.createElement('div');
     right.className = 'flex items-center gap-1';
     right.appendChild(window.makeCopyButton(def.label, 'Copy column name'));
-    right.appendChild(btn);
     if (active) {
       const clr = document.createElement('button');
       clr.type = 'button';
@@ -1890,6 +1890,8 @@ class TableDetails extends HTMLElement {
       clr.innerHTML = '<i data-lucide="filter-x" class="size-3 text-error"></i>';
       clr.addEventListener('click', () => { delete this._structColFilters[c]; this.saveTableState(); this.renderStructure(); });
       right.appendChild(clr);
+    } else {
+      right.appendChild(btn);
     }
     box.append(label, right);
     th.appendChild(box);
