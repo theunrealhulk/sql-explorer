@@ -885,8 +885,8 @@ function selectDb(db) {
   pushHistory(db, null);
   saveContext();
 }
-function selectTable(db, table) {
-  currentDb = db; currentTable = table; renderCrumbs(); renderInfo(); showTableDetails(db, table);
+function selectTable(db, table, keepTab) {
+  currentDb = db; currentTable = table; renderCrumbs(); renderInfo(); showTableDetails(db, table, keepTab);
   pushHistory(db, table.name, 'table');
   highlightDb(db);
   saveContext();
@@ -967,7 +967,9 @@ function updateNavButtons() {
 }
 
 // Mounts the <table-details> web component for the selected table.
-function showTableDetails(db, table) {
+function showTableDetails(db, table, keepTab) {
+  // Fresh navigation opens on Data (falls back to Structure when empty); only a restore keeps the last sub-tab.
+  if (!keepTab) localStorage.removeItem(window.tabKey(activeTabId, 'table-tab'));
   const placeholder = document.getElementById('placeholder');
   if (placeholder) placeholder.style.display = 'none';
   const host = document.getElementById('detail');
@@ -2310,7 +2312,7 @@ async function applyContext(saved) {
     selectObject(saved.db, { name: saved.name });
   } else if (saved.name) {
     const t = (dbTables[saved.db] || []).find(x => x.name === saved.name) || { name: saved.name, schemaName: 'dbo' };
-    selectTable(saved.db, t);
+    selectTable(saved.db, t, true);
   } else {
     selectDb(saved.db);
   }
