@@ -963,7 +963,6 @@ window.SqlScratchTab = {
         fbtn.addEventListener('click', (e) => { e.stopPropagation(); showInput(th, c); });
         const right = document.createElement('span');
         right.className = 'inline-flex items-center gap-1';
-        right.appendChild(fbtn);
         if (active) {
           const clr = document.createElement('button');
           clr.type = 'button';
@@ -972,6 +971,8 @@ window.SqlScratchTab = {
           clr.innerHTML = '<i data-lucide="filter-x" class="size-3 text-error"></i>';
           clr.addEventListener('click', (e) => { e.stopPropagation(); delete colFilters[c]; showLabel(th, c); renderRows(); });
           right.appendChild(clr);
+        } else {
+          right.appendChild(fbtn);
         }
         inner.append(left, right);
         th.appendChild(inner);
