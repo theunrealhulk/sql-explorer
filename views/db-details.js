@@ -496,7 +496,6 @@ class DbDetails extends HTMLElement {
     btn.addEventListener('click', () => this.renderHeaderInput(th, col));
     const right = document.createElement('div');
     right.className = 'flex items-center gap-1';
-    if (filterable) right.appendChild(btn);
     if (filterable && active) {
       const clr = document.createElement('button');
       clr.type = 'button';
@@ -505,6 +504,8 @@ class DbDetails extends HTMLElement {
       clr.innerHTML = '<i data-lucide="filter-x" class="size-3 text-error"></i>';
       clr.addEventListener('click', () => { delete this._colFilters[c]; this.page = 1; this.loadTables(); });
       right.appendChild(clr);
+    } else if (filterable) {
+      right.appendChild(btn);
     }
     box.append(label, right);
     th.appendChild(box);
