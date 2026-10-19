@@ -133,6 +133,7 @@ class TableDetails extends HTMLElement {
     this.dataView = localStorage.getItem(this.storeKey('data-view')) || 'table';
     this.hiddenColumns = new Set();
     this._colFilters = {};
+    this._lastFilterCol = null;
     this._sortCol = null;
     this._sortDir = 1;
     this.search = '';
@@ -280,11 +281,16 @@ class TableDetails extends HTMLElement {
     const p = document.createElement('p');
     p.className = 'text-base-content/60';
     p.textContent = 'No rows match the active filter.';
+    // Undo just the most recent filter when we know which one emptied the results.
+    const last = this._lastFilterCol && this._colFilters[this._lastFilterCol] ? this._lastFilterCol : null;
     const btn = document.createElement('button');
     btn.className = 'btn btn-sm btn-ghost text-error';
-    btn.innerHTML = '<i data-lucide="filter-x" class="size-4"></i> Clear filters';
+    btn.innerHTML = '<i data-lucide="filter-x" class="size-4"></i> ' + (last ? 'Clear last filter' : 'Clear filters');
+    if (last) btn.title = 'Remove the filter on ' + last;
     btn.addEventListener('click', () => {
-      this._colFilters = {};
+      if (last) delete this._colFilters[last];
+      else this._colFilters = {};
+      this._lastFilterCol = null;
       this.saveTableState();
       this.page = 1;
       this.loadData();
@@ -535,13 +541,13 @@ class TableDetails extends HTMLElement {
   renderTable(target, d, visible) {
     const wrap = document.createElement('div');
     wrap.className = 'overflow-auto min-h-0 flex-1';
-    if (Object.values(this._colFilters).some(v => v)) wrap.classList.add('filter-active-border');
     const table = document.createElement('table');
     table.className = 'table table-zebra table-sm';
 
     const thead = document.createElement('thead');
     thead.className = 'sticky top-0 z-10 bg-base-100';
     const htr = document.createElement('tr');
+    const filtered = (c) => !!this._colFilters[c];
     // Leading selection column: a "select all rows on this page" checkbox.
     const selTh = document.createElement('th');
     selTh.className = 'w-8';
@@ -562,6 +568,7 @@ class TableDetails extends HTMLElement {
     htr.appendChild(selTh);
     visible.forEach(c => {
       const th = document.createElement('th');
+      if (filtered(c)) th.classList.add('filter-col', 'filter-col-top');
       this.renderHeaderLabel(th, c);
       htr.appendChild(th);
     });
@@ -616,9 +623,9 @@ class TableDetails extends HTMLElement {
       });
       visible.forEach(c => {
         const td = document.createElement('td');
-        td.className = 'max-w-xs break-words whitespace-normal';
-        const v = row[c];
-        this.highlightInto(td, v === null || v === undefined ? '' : String(v));
+        td.className = 'max-w-xs break-words whitespace-normal' +
+          (filtered(c) ? ' filter-col' + (i === d.rows.length - 1 ? ' filter-col-bottom' : '') : '');
+        this.renderCell(td, row[c]);
         td.addEventListener('dblclick', () => this.beginCellEdit(td, row, c));
         tr.appendChild(td);
       });
@@ -707,8 +714,8 @@ class TableDetails extends HTMLElement {
     cancel.title = 'Cancel (Esc)';
     cancel.innerHTML = '<i data-lucide="x" class="size-3"></i>';
 
-    const restore = (text) => { td._editing = false; this.highlightInto(td, text); };
-    const doCancel = () => restore(original);
+    const restore = () => { td._editing = false; this.renderCell(td, row[col]); };
+    const doCancel = () => restore();
     const doCommit = async () => {
       const newVal = input.value;
       if (newVal === original) { doCancel(); return; }
@@ -722,7 +729,7 @@ class TableDetails extends HTMLElement {
         const oldKey = this.rowKey(row);
         row[col] = newVal === '' ? null : newVal;
         this.rekeySelection(oldKey, row);
-        restore(newVal);
+        restore();
       } catch (e) {
         ok.disabled = cancel.disabled = input.disabled = false;
         input.classList.add('input-error');
@@ -1149,7 +1156,7 @@ class TableDetails extends HTMLElement {
     btn.type = 'button';
     btn.className = 'btn btn-ghost btn-xs btn-square';
     const active = !!this._colFilters[c];
-    btn.title = active ? ('Filter: ' + this._colFilters[c]) : 'Filter this column';
+    btn.title = active ? ('Filter: ' + this.describeFilter(this._colFilters[c])) : 'Filter this column';
     btn.innerHTML = '<i data-lucide="filter" class="size-3' + (active ? ' text-primary' : '') + '"></i>';
     btn.addEventListener('click', () => this.renderHeaderInput(th, c));
     const right = document.createElement('div');
@@ -1165,27 +1172,81 @@ class TableDetails extends HTMLElement {
       clr.addEventListener('click', () => { delete this._colFilters[c]; this.saveTableState(); this.page = 1; this.loadData(); });
       right.appendChild(clr);
     }
-    box.append(label, right);
+    const left = document.createElement('div');
+    left.className = 'flex items-center gap-2 min-w-0';
+    left.appendChild(label);
+    if (active) {
+      const badge = document.createElement('span');
+      badge.className = 'badge badge-warning badge-sm cursor-pointer whitespace-nowrap max-w-48 truncate';
+      badge.textContent = this.describeFilter(this._colFilters[c]);
+      badge.title = 'Filter: ' + badge.textContent + ' (click to edit)';
+      badge.addEventListener('click', () => this.renderHeaderInput(th, c));
+      left.appendChild(badge);
+    }
+    box.append(left, right);
     th.appendChild(box);
     if (window.lucide) window.lucide.createIcons({ root: th });
   }
 
+  // Human-readable form of a stored column filter (special tokens for string columns).
+  describeFilter(v) {
+    if (v === '{empty}') return 'is empty';
+    if (v === '{notempty}') return 'is not empty';
+    if (v === '{null}') return 'is NULL';
+    const neq = String(v).match(/^(?:!=|<>|!)\s*(.*)$/);
+    return neq ? 'not equal to "' + neq[1] + '"' : String(v);
+  }
+
   // Column header in input mode: a text field to type a filter value plus an X
   // to cancel. Enter applies the filter; X (or Escape) exits, clearing any
-  // active filter for the column.
+  // active filter for the column. String columns also get a mode select.
   renderHeaderInput(th, c) {
     th.innerHTML = '';
     const box = document.createElement('div');
-    box.className = 'flex items-center gap-1';
+    box.className = 'flex items-center gap-1 min-w-max';
     const input = document.createElement('input');
     input.type = 'text';
-    input.className = 'input input-xs input-bordered w-20';
+    input.className = 'input input-xs input-bordered w-40';
     const opCol = this.isOperatorColumn(c);
     input.placeholder = opCol ? '=,>,<  [1,5]  (1,2)' : 'Filter…';
     input.title = opCol
       ? 'Operators: =, >, <, >=, <=, ! (default =)\nRange: [min,max]\nList: (v1,v2,v3)'
       : 'Filter this column';
-    input.value = this._colFilters[c] || '';
+    const current = this._colFilters[c] || '';
+    input.value = current;
+    const apply = (val) => {
+      if (val) { this._colFilters[c] = val; this._lastFilterCol = c; }
+      else delete this._colFilters[c];
+      this.saveTableState();
+      this.page = 1;
+      this.loadData();
+    };
+
+    let mode = null;
+    if (!opCol) {
+      mode = document.createElement('select');
+      mode.className = 'select select-xs w-28';
+      [['contains', 'Contains'], ['neq', 'Not equal'], ['{empty}', 'Empty'], ['{notempty}', 'Not empty'], ['{null}', 'NULL']]
+        .forEach(([v, label]) => {
+          const o = document.createElement('option');
+          o.value = v;
+          o.textContent = label;
+          mode.appendChild(o);
+        });
+      const neq = current.match(/^(?:!=|<>|!)\s*(.*)$/);
+      if (['{empty}', '{notempty}', '{null}'].includes(current)) { mode.value = current; input.value = ''; }
+      else if (neq) { mode.value = 'neq'; input.value = neq[1]; }
+      const syncInput = () => { input.classList.toggle('hidden', mode.value.startsWith('{')); };
+      syncInput();
+      // Value-less modes apply immediately; the others wait for Enter.
+      mode.addEventListener('change', () => {
+        syncInput();
+        if (mode.value.startsWith('{')) apply(mode.value);
+        else input.focus();
+      });
+      mode.addEventListener('keydown', (e) => { if (e.key === 'Escape') this.exitHeaderFilter(th, c); });
+    }
+
     const x = document.createElement('button');
     x.type = 'button';
     x.className = 'btn btn-ghost btn-xs btn-square';
@@ -1195,20 +1256,18 @@ class TableDetails extends HTMLElement {
       if (e.key === 'Enter') {
         e.preventDefault();
         const val = input.value.trim();
-        if (val) this._colFilters[c] = val;
-        else delete this._colFilters[c];
-        this.saveTableState();
-        this.page = 1;
-        this.loadData();
+        apply(mode && mode.value === 'neq' && val ? '!=' + val : val);
       } else if (e.key === 'Escape') {
         this.exitHeaderFilter(th, c);
       }
     });
     x.addEventListener('click', () => this.exitHeaderFilter(th, c));
+    if (mode) box.append(mode);
     box.append(input, x);
     th.appendChild(box);
     if (window.lucide) window.lucide.createIcons({ root: th });
-    input.focus();
+    if (mode && mode.value.startsWith('{')) mode.focus();
+    else input.focus();
   }
 
   // Exits filter-input mode: clears any active filter for the column and
@@ -1217,6 +1276,19 @@ class TableDetails extends HTMLElement {
     const had = !!this._colFilters[c];
     if (had) { delete this._colFilters[c]; this.saveTableState(); this.page = 1; this.loadData(); }
     else this.renderHeaderLabel(th, c);
+  }
+
+  // Fills a data cell: NULL gets a dimmed italic marker so it's distinguishable from ''.
+  renderCell(td, v) {
+    td.textContent = '';
+    if (v === null || v === undefined) {
+      const n = document.createElement('span');
+      n.className = 'italic text-base-content/40 select-none';
+      n.textContent = 'NULL';
+      td.appendChild(n);
+      return;
+    }
+    this.highlightInto(td, String(v));
   }
 
   // Fills a cell with text, wrapping the parts that match the active search
@@ -1499,6 +1571,21 @@ class TableDetails extends HTMLElement {
       saveBtn.title = 'Insert the duplicated rows';
       saveBtn.addEventListener('click', () => this.savePendingRows());
       actions.appendChild(saveBtn);
+    }
+    const activeFilters = Object.keys(this._colFilters).filter(k => this._colFilters[k]).length;
+    if (activeFilters >= 2) {
+      const clearFilters = document.createElement('button');
+      clearFilters.type = 'button';
+      clearFilters.className = 'btn btn-sm btn-ghost text-warning gap-1';
+      clearFilters.title = 'Clear all ' + activeFilters + ' column filters';
+      clearFilters.innerHTML = '<i data-lucide="filter-x" class="size-4"></i>Clear filters (' + activeFilters + ')';
+      clearFilters.addEventListener('click', () => {
+        this._colFilters = {};
+        this.saveTableState();
+        this.page = 1;
+        this.loadData();
+      });
+      actions.appendChild(clearFilters);
     }
     const infoBtn = document.createElement('button');
     infoBtn.type = 'button';
